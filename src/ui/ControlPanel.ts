@@ -1,12 +1,14 @@
-import type {
-  BenchmarkMode,
-  BenchmarkProgress,
-  EngineController,
-  SandboxPasses,
-  StageDescriptor,
-  StageId,
+import {
+  BENCHMARK_PRESETS,
+  type BenchmarkMode,
+  type BenchmarkProgress,
+  type EngineController,
+  type PresetId,
+  type SandboxPasses,
+  type StageDescriptor,
+  type StageId,
 } from '../types.ts';
-import { formatDurationSec, formatResolution } from './format.ts';
+import { formatDurationSec, formatResolution, formatSeedHex } from './format.ts';
 
 interface PassConfig {
   key: keyof SandboxPasses;
@@ -72,6 +74,10 @@ export class ControlPanel {
   private readonly stageRows = new Map<StageId, StageRowElements>();
 
   private readonly passSwitches = new Map<keyof SandboxPasses, HTMLButtonElement>();
+  private readonly profileButtons = new Map<Exclude<PresetId, 'custom'>, HTMLButtonElement>();
+  private readonly stability5Btn: HTMLButtonElement;
+  private readonly stability10Btn: HTMLButtonElement;
+  private readonly shareUrlBtn: HTMLButtonElement;
   private readonly resolutionSlider: HTMLInputElement;
   private readonly resolutionValueEl: HTMLElement;
   private readonly resolutionPixelsEl: HTMLElement;
@@ -186,7 +192,73 @@ export class ControlPanel {
     this.stageListEl.className = 'am-stage-list';
     this.buildStageRows(this.controller.getStageDescriptors());
 
-    this.benchmarkSection.append(actionRow, progressBox, this.stageListEl);
+    // Presets (Mobile / Laptop / Desktop / Extreme)
+    const presetWrap = document.createElement('div');
+    presetWrap.className = 'am-preset-block';
+    const presetHeader = document.createElement('div');
+    presetHeader.className = 'am-group-label';
+    presetHeader.textContent = 'Hardware Profile';
+    const profileRow = document.createElement('div');
+    profileRow.className = 'am-profile-row';
+    for (const key of ['mobile', 'laptop', 'desktop', 'extreme'] as const) {
+      const preset = BENCHMARK_PRESETS[key];
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'am-preset-btn';
+      btn.textContent = preset.label;
+      btn.title = preset.description;
+      btn.setAttribute('data-testid', `profile-${key}`);
+      btn.addEventListener('click', () => {
+        this.controller.applyPreset(key);
+      });
+      this.profileButtons.set(key, btn);
+      profileRow.appendChild(btn);
+    }
+    presetWrap.append(presetHeader, profileRow);
+
+    // Stability & Shareable URL row
+    const toolsRow = document.createElement('div');
+    toolsRow.className = 'am-tools-row';
+
+    this.stability5Btn = document.createElement('button');
+    this.stability5Btn.type = 'button';
+    this.stability5Btn.className = 'am-btn am-btn-secondary';
+    this.stability5Btn.textContent = '5m Stability';
+    this.stability5Btn.addEventListener('click', () => {
+      this.controller.startStabilityTest(5);
+    });
+
+    this.stability10Btn = document.createElement('button');
+    this.stability10Btn.type = 'button';
+    this.stability10Btn.className = 'am-btn am-btn-secondary';
+    this.stability10Btn.textContent = '10m Stability';
+    this.stability10Btn.addEventListener('click', () => {
+      this.controller.startStabilityTest(10);
+    });
+
+    this.shareUrlBtn = document.createElement('button');
+    this.shareUrlBtn.type = 'button';
+    this.shareUrlBtn.className = 'am-btn am-btn-ghost';
+    this.shareUrlBtn.textContent = 'Copy Config URL';
+    this.shareUrlBtn.addEventListener('click', () => {
+      const url = new URL(window.location.href);
+      const pid = this.controller.getPresetId();
+      if (pid !== 'custom') url.searchParams.set('preset', pid);
+      else url.searchParams.delete('preset');
+      url.searchParams.set('res', this.controller.getResolutionScale().toFixed(2));
+      url.searchParams.set('seed', formatSeedHex(this.controller.getSeed()));
+      url.searchParams.set('autorun', '1');
+      void navigator.clipboard?.writeText(url.toString()).then(() => {
+        this.shareUrlBtn.textContent = 'Copied!';
+        setTimeout(() => {
+          this.shareUrlBtn.textContent = 'Copy Config URL';
+        }, 1500);
+      });
+    });
+
+    toolsRow.append(this.stability5Btn, this.stability10Btn, this.shareUrlBtn);
+
+    this.benchmarkSection.append(actionRow, presetWrap, progressBox, this.stageListEl, toolsRow);
 
     // Sandbox Mode Section
     this.sandboxSection = document.createElement('div');
@@ -359,6 +431,12 @@ export class ControlPanel {
 
   public updateEffectiveResolution(width: number, height: number): void {
     this.resolutionPixelsEl.textContent = `${formatResolution(width, height)} px`;
+  }
+
+  public setPreset(presetId: PresetId): void {
+    for (const [id, btn] of this.profileButtons.entries()) {
+      btn.classList.toggle('is-active', id === presetId);
+    }
   }
 
   public setHasLastResult(hasResult: boolean): void {

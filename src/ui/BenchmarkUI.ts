@@ -1,4 +1,5 @@
 import '../styles/main.css';
+import { RunHistoryStorage } from '../storage/RunHistoryStorage.ts';
 import type {
   BenchmarkMode,
   BenchmarkProgress,
@@ -13,6 +14,7 @@ import type {
   WebGLGPUInfo,
 } from '../types.ts';
 import { ControlPanel } from './ControlPanel.ts';
+import { HistoryCompareModal } from './HistoryCompareModal.ts';
 import { ScorecardModal } from './ScorecardModal.ts';
 import { TelemetryHUD } from './TelemetryHUD.ts';
 import { formatFps, formatMs, getFpsSeverityColor } from './format.ts';
@@ -28,6 +30,7 @@ export class BenchmarkUI {
   private readonly overlayEl: HTMLElement;
   private readonly topActionsEl: HTMLElement;
   private readonly hudToggleBtn: HTMLButtonElement;
+  private readonly topHistoryBtn: HTMLButtonElement;
   private readonly topScorecardBtn: HTMLButtonElement;
   private readonly minimalPillEl: HTMLElement;
   private readonly minimalDotEl: HTMLElement;
@@ -41,6 +44,7 @@ export class BenchmarkUI {
   private readonly telemetryHUD: TelemetryHUD;
   private readonly controlPanel: ControlPanel;
   private readonly scorecardModal: ScorecardModal;
+  private readonly historyModal: HistoryCompareModal;
   private readonly callbacks: UICallbacks;
 
   private minimalHud = false;
@@ -71,6 +75,15 @@ export class BenchmarkUI {
       this.openLastScorecard();
     });
 
+    this.topHistoryBtn = document.createElement('button');
+    this.topHistoryBtn.type = 'button';
+    this.topHistoryBtn.className = 'am-pill-btn';
+    this.topHistoryBtn.setAttribute('data-testid', 'open-history-btn');
+    this.topHistoryBtn.textContent = 'History';
+    this.topHistoryBtn.addEventListener('click', () => {
+      this.historyModal.openHistory();
+    });
+
     this.hudToggleBtn = document.createElement('button');
     this.hudToggleBtn.type = 'button';
     this.hudToggleBtn.className = 'am-pill-btn';
@@ -81,7 +94,7 @@ export class BenchmarkUI {
       this.setMinimalHud(true);
     });
 
-    this.topActionsEl.append(this.topScorecardBtn, this.hudToggleBtn);
+    this.topActionsEl.append(this.topScorecardBtn, this.topHistoryBtn, this.hudToggleBtn);
 
     // Unobtrusive Minimal HUD corner pill
     this.minimalPillEl = document.createElement('div');
@@ -160,6 +173,7 @@ export class BenchmarkUI {
         this.controller.startBenchmark();
       },
     });
+    this.historyModal = new HistoryCompareModal(this.overlayEl);
 
     this.root.appendChild(this.overlayEl);
 
@@ -228,6 +242,7 @@ export class BenchmarkUI {
     this.telemetryHUD.dispose();
     this.controlPanel.dispose();
     this.scorecardModal.dispose();
+    this.historyModal.dispose();
     this.overlayEl.remove();
   }
 
@@ -237,6 +252,7 @@ export class BenchmarkUI {
     this.controlPanel.setMode(this.controller.getMode());
     this.controlPanel.setSandboxPasses(this.controller.getSandboxPasses());
     this.controlPanel.setResolutionScale(this.controller.getResolutionScale());
+    this.controlPanel.setPreset(this.controller.getPresetId());
     this.controlPanel.updateProgress(this.controller.getProgress());
 
     const lastResult = this.controller.getLastResult();
@@ -323,6 +339,7 @@ export class BenchmarkUI {
 
   private handleBenchmarkComplete(result: BenchmarkResult): void {
     if (this.disposed) return;
+    RunHistoryStorage.saveRun(result);
     this.syncScorecardAvailability(true);
     this.scorecardModal.open(result);
   }
@@ -334,7 +351,7 @@ export class BenchmarkUI {
 
   private handleStabilityComplete(report: StabilityReport): void {
     if (this.disposed) return;
-    this.handleError(`Stability Test Complete: ${report.verdict}`);
+    this.historyModal.openStabilityReport(report);
   }
 
   private handleModeChange(mode: BenchmarkMode): void {
@@ -352,8 +369,9 @@ export class BenchmarkUI {
     this.controlPanel.setResolutionScale(scale);
   }
 
-  private handlePresetChange(_presetId: PresetId): void {
-    // Wired in Phase 3 ControlPanel preset selector
+  private handlePresetChange(presetId: PresetId): void {
+    if (this.disposed) return;
+    this.controlPanel.setPreset(presetId);
   }
 
   private handleContextLost(message: string): void {

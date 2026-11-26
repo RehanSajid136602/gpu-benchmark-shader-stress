@@ -1572,3 +1572,109 @@ select:focus-visible,
     display: none;
   }
 }
+
+/* ===== Phase 3: Presets, Stability, History & Compare ===== */
+.am-preset-block {
+  margin-top: 10px;
+}
+
+.am-profile-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.am-tools-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.am-tools-row .am-btn {
+  flex: 1 1 auto;
+  font-size: 11px;
+  padding: 6px 8px;
+}
+
+.am-history-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.am-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.am-history-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--carbon-well);
+  border: 1px solid var(--rule);
+  border-radius: var(--am-radius-control);
+}
+
+.am-history-row.is-selected {
+  border-color: var(--signal);
+}
+
+.am-history-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.am-history-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.am-history-preset {
+  font-family: var(--am-font-mono);
+  font-size: 10px;
+  color: var(--ink-muted);
+}
+
+.am-history-meta {
+  font-family: var(--am-font-mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+  margin-top: 2px;
+}
+
+.am-pb-badge {
+  padding: 1px 6px;
+  font-family: var(--am-font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--carbon);
+  background: var(--warn);
+  border-radius: 3px;
+}
+
+.am-compare-box {
+  margin-bottom: 14px;
+  padding: 12px;
+  background: #0c0f15;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--am-radius-card);
+}
+
+.am-compare-summary {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-family: var(--am-font-mono);
+  font-size: 12px;
+  margin-bottom: 10px;
+}
