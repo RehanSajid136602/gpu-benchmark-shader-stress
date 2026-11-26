@@ -304,11 +304,12 @@ export class BenchmarkUI {
     this.controlPanel.updateProgress(progress);
 
     if (progress.running) {
+      const totalStages = Math.max(1, this.controller.getStageDescriptors().length);
       const left = Math.max(0, progress.totalDurationSec - progress.totalElapsedSec);
       this.minimalStageEl.hidden = false;
       this.minimalStageEl.textContent = progress.stabilityMode
-        ? `LOOP ${progress.stabilityLoopIndex ?? 1} · S${progress.stageIndex + 1}/4`
-        : `S${progress.stageIndex + 1}/4 · ${left.toFixed(0)}s`;
+        ? `LOOP ${progress.stabilityLoopIndex ?? 1} · S${progress.stageIndex + 1}/${totalStages}`
+        : `S${progress.stageIndex + 1}/${totalStages} · ${left.toFixed(0)}s`;
     } else {
       this.minimalStageEl.hidden = true;
     }

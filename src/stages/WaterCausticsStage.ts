@@ -27,7 +27,7 @@ export class WaterCausticsStage implements BenchmarkStage {
   public readonly name = 'Water Refraction & Caustics';
   public readonly description =
     'Multi-pass Gerstner wave simulation with dynamic planar reflection, depth-aware refraction, Beer-Lambert absorption, and projected chromatic caustics.';
-  public readonly weight = 0.25;
+  public readonly weight = 0.2;
 
   private readonly scene = new THREE.Scene();
   private readonly reflectionCamera = new THREE.PerspectiveCamera(55, 16 / 9, 0.1, 400);

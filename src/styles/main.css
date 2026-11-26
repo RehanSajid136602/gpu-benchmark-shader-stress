@@ -1580,9 +1580,21 @@ select:focus-visible,
 
 .am-profile-row {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 6px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 5px;
   margin-top: 6px;
+}
+
+.am-preset-warning {
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: rgba(245, 184, 65, 0.1);
+  border: 1px solid rgba(245, 184, 65, 0.45);
+  border-radius: var(--am-radius-control);
+  color: var(--warn);
+  font-family: var(--am-font-mono);
+  font-size: 10.5px;
+  line-height: 1.35;
 }
 
 .am-tools-row {

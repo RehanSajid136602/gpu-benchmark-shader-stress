@@ -2,6 +2,7 @@ import { BenchmarkEngine } from './engine/BenchmarkEngine.ts';
 import { CombinedBloomStage } from './stages/CombinedBloomStage.ts';
 import { InstancedStressStage } from './stages/InstancedStressStage.ts';
 import { RaymarchFractalStage } from './stages/RaymarchFractalStage.ts';
+import { VolumetricOverdrawStage } from './stages/VolumetricOverdrawStage.ts';
 import { WaterCausticsStage } from './stages/WaterCausticsStage.ts';
 import { BenchmarkUI } from './ui/BenchmarkUI.ts';
 
@@ -16,6 +17,7 @@ function bootstrap(): void {
     new RaymarchFractalStage(),
     new WaterCausticsStage(),
     new CombinedBloomStage(),
+    new VolumetricOverdrawStage(),
   ];
 
   let engine: BenchmarkEngine;

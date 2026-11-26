@@ -5,24 +5,25 @@
 AetherMark is a client-side WebGL2 GPU benchmark and shader stress suite built with TypeScript, Three.js, custom GLSL shaders, and Vite.
 
 ## Features
-- **4-Stage Automated Benchmark (normalized weights summing to 1.00):**
-  1. **500k Instanced Crystal Vortex** (`0.25`) — 500,000 GPU-instanced octahedrons (4.0M triangles) with vertex-shader curl fields.
-  2. **Raymarched Mandelbulb & Nebula** (`0.30`) — Full-screen SDF raymarching with volumetric nebula, AO, soft shadows, and iridescence.
-  3. **Water Refraction & Caustics** (`0.25`) — Multi-pass Gerstner waves with planar reflection, depth-aware refraction, and chromatic caustics.
-  4. **Combined Bloom & Dynamic Lighting** (`0.20`) — Instanced monoliths, 48k shards, plasma core, mirror deck, 6 dynamic lights, and `UnrealBloomPass`.
+- **5-Stage Automated Benchmark (normalized weights summing to 1.00):**
+  1. **500k Instanced Crystal Vortex** (`0.20`) — 500,000 GPU-instanced octahedrons (4.0M triangles) with vertex-shader curl fields.
+  2. **Raymarched Mandelbulb & Nebula** (`0.25`) — Full-screen SDF raymarching with volumetric nebula, AO, soft shadows, and iridescence.
+  3. **Water Refraction & Caustics** (`0.20`) — Multi-pass Gerstner waves with planar reflection, depth-aware refraction, and chromatic caustics.
+  4. **Combined Bloom & Dynamic Lighting** (`0.15`) — Instanced monoliths, 48k shards, plasma core, mirror deck, 6 dynamic lights, and `UnrealBloomPass`.
+  5. **Volumetric God-Rays & Overdraw** (`0.20`) — 36,000 layered volumetric sprites and 64 instanced god-ray light shafts stressing alpha overdraw and fill-rate.
 - **Flight-Recorder Telemetry:**
   - 1500 ms per-stage warmup discard (eliminates shader-compile and first-frame spikes).
   - Median FPS, 1% low, P95/P99 frame times, MAD, CV, stutter count, thermal throttling detection, and VSync refresh-cap detection.
   - Non-stalling `EXT_disjoint_timer_query_webgl2` GPU timer wrapper (degrades gracefully to `unavailable` when unsupported).
   - Resilience against `webglcontextlost`, `visibilitychange` background tab throttling, mid-run `devicePixelRatio` changes, and software rasterizers.
 - **Super-Tool Features:**
-  - **Hardware Profiles:** `Mobile`, `Laptop`, `Desktop`, `Extreme`.
+  - **Hardware Profiles:** `Phone`, `Tablet`, `Laptop`, `Desktop`, `Extreme` (with automatic device detection and non-blocking mismatch warnings).
   - **Stability Loop:** 5-minute or 10-minute loop plotting FPS-decay curves and sustained-vs-peak throttle verdicts.
   - **Run History & Side-by-Side Compare:** Versioned `localStorage` persistence with delta badges (`▲/▼ %`) and Personal Best tracking (high-confidence runs only).
   - **Exports:** Full JSON, raw-metrics CSV, and offscreen-rendered shareable PNG scorecard.
 
 ## URL Parameters
-- `?preset=mobile|laptop|desktop|extreme` — Apply a hardware profile on load.
+- `?preset=mobile|tablet|laptop|desktop|extreme` — Apply a hardware profile on load.
 - `?res=0.5..2.0` — Override resolution scale.
 - `?stageDuration=1..300` — Override seconds per stage (default `15`).
 - `?seed=<number|0xhex|string>` — Deterministic `mulberry32` run seed for reproducible runs.

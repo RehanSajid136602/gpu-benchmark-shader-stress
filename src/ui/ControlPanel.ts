@@ -8,6 +8,11 @@ import {
   type StageDescriptor,
   type StageId,
 } from '../types.ts';
+import {
+  detectDeviceClass,
+  getPresetDeviceWarning,
+  type DeviceDetectionInfo,
+} from '../utils/deviceDetection.ts';
 import { formatDurationSec, formatResolution, formatSeedHex } from './format.ts';
 
 interface PassConfig {
@@ -75,6 +80,8 @@ export class ControlPanel {
 
   private readonly passSwitches = new Map<keyof SandboxPasses, HTMLButtonElement>();
   private readonly profileButtons = new Map<Exclude<PresetId, 'custom'>, HTMLButtonElement>();
+  private readonly deviceWarningEl: HTMLElement;
+  private readonly detectedDevice: DeviceDetectionInfo;
   private readonly stability5Btn: HTMLButtonElement;
   private readonly stability10Btn: HTMLButtonElement;
   private readonly shareUrlBtn: HTMLButtonElement;
@@ -97,6 +104,8 @@ export class ControlPanel {
     this.controller = controller;
     this.onOpenScorecard = onOpenScorecard;
 
+    this.detectedDevice = detectDeviceClass();
+
     this.element = document.createElement('section');
     this.element.className = 'am-panel am-control-panel';
     this.element.setAttribute('data-testid', 'control-panel');
@@ -113,7 +122,7 @@ export class ControlPanel {
     this.benchmarkModeBtn.className = 'am-mode-btn';
     this.benchmarkModeBtn.setAttribute('role', 'tab');
     this.benchmarkModeBtn.setAttribute('data-testid', 'mode-benchmark');
-    this.benchmarkModeBtn.textContent = '60s Benchmark';
+    this.benchmarkModeBtn.textContent = 'Benchmark';
     this.benchmarkModeBtn.addEventListener('click', () => {
       this.controller.setMode('benchmark');
     });
@@ -141,7 +150,7 @@ export class ControlPanel {
     this.startStopBtn.type = 'button';
     this.startStopBtn.className = 'am-btn am-btn-primary';
     this.startStopBtn.setAttribute('data-testid', 'start-benchmark-btn');
-    this.startStopBtn.textContent = 'Start 60s Benchmark';
+    this.startStopBtn.textContent = 'Start 75s Benchmark';
     this.startStopBtn.addEventListener('click', () => {
       if (this.isRunning) {
         this.controller.stopBenchmark();
@@ -171,12 +180,15 @@ export class ControlPanel {
     this.stageSummaryEl = document.createElement('span');
     this.stageSummaryEl.className = 'am-progress-title';
     this.stageSummaryEl.setAttribute('data-testid', 'benchmark-stage-label');
-    this.stageSummaryEl.textContent = 'Ready · 4 stages';
+    const initialStages = Math.max(1, this.controller.getStageDescriptors().length);
+    const initialTotalSec = initialStages * 15;
+    this.totalDurationSec = initialTotalSec;
+    this.stageSummaryEl.textContent = `Ready · ${initialStages} stages`;
 
     this.remainingEl = document.createElement('span');
     this.remainingEl.className = 'am-progress-time num';
     this.remainingEl.setAttribute('data-testid', 'benchmark-remaining');
-    this.remainingEl.textContent = '60.0s / 60s';
+    this.remainingEl.textContent = `${initialTotalSec.toFixed(1)}s / ${initialTotalSec}s`;
 
     progressHeader.append(this.stageSummaryEl, this.remainingEl);
 
@@ -192,15 +204,15 @@ export class ControlPanel {
     this.stageListEl.className = 'am-stage-list';
     this.buildStageRows(this.controller.getStageDescriptors());
 
-    // Presets (Mobile / Laptop / Desktop / Extreme)
+    // Presets (Phone / Tablet / Laptop / Desktop / Extreme)
     const presetWrap = document.createElement('div');
     presetWrap.className = 'am-preset-block';
     const presetHeader = document.createElement('div');
     presetHeader.className = 'am-group-label';
-    presetHeader.textContent = 'Hardware Profile';
+    presetHeader.textContent = `Hardware Profile (Detected: ${this.detectedDevice.label})`;
     const profileRow = document.createElement('div');
     profileRow.className = 'am-profile-row';
-    for (const key of ['mobile', 'laptop', 'desktop', 'extreme'] as const) {
+    for (const key of ['mobile', 'tablet', 'laptop', 'desktop', 'extreme'] as const) {
       const preset = BENCHMARK_PRESETS[key];
       const btn = document.createElement('button');
       btn.type = 'button';
@@ -214,7 +226,14 @@ export class ControlPanel {
       this.profileButtons.set(key, btn);
       profileRow.appendChild(btn);
     }
-    presetWrap.append(presetHeader, profileRow);
+
+    this.deviceWarningEl = document.createElement('div');
+    this.deviceWarningEl.className = 'am-preset-warning';
+    this.deviceWarningEl.setAttribute('role', 'status');
+    this.deviceWarningEl.setAttribute('data-testid', 'device-mismatch-warning');
+    this.deviceWarningEl.hidden = true;
+
+    presetWrap.append(presetHeader, profileRow, this.deviceWarningEl);
 
     // Stability & Shareable URL row
     const toolsRow = document.createElement('div');
@@ -437,6 +456,14 @@ export class ControlPanel {
     for (const [id, btn] of this.profileButtons.entries()) {
       btn.classList.toggle('is-active', id === presetId);
     }
+    const warning = getPresetDeviceWarning(presetId, this.detectedDevice);
+    if (warning) {
+      this.deviceWarningEl.textContent = `⚠ ${warning}`;
+      this.deviceWarningEl.hidden = false;
+    } else {
+      this.deviceWarningEl.textContent = '';
+      this.deviceWarningEl.hidden = true;
+    }
   }
 
   public setHasLastResult(hasResult: boolean): void {
@@ -519,10 +546,11 @@ export class ControlPanel {
       descriptors.length > 0
         ? descriptors
         : [
-            { id: 'instanced', name: 'Instanced 500k Mesh', description: '', weight: 1.0 },
-            { id: 'raymarch', name: 'Raymarched Fractal Shader', description: '', weight: 1.3 },
-            { id: 'water', name: 'Water Refraction & Caustics', description: '', weight: 1.2 },
-            { id: 'combined', name: 'Combined Stress Scene', description: '', weight: 1.5 },
+            { id: 'instanced', name: 'Instanced 500k Mesh', description: '', weight: 0.2 },
+            { id: 'raymarch', name: 'Raymarched Fractal Shader', description: '', weight: 0.25 },
+            { id: 'water', name: 'Water Refraction & Caustics', description: '', weight: 0.2 },
+            { id: 'combined', name: 'Combined Stress Scene', description: '', weight: 0.15 },
+            { id: 'volumetric', name: 'Volumetric God-Rays & Overdraw', description: '', weight: 0.2 },
           ];
 
     items.forEach((stage, index) => {

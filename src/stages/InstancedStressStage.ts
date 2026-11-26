@@ -31,7 +31,7 @@ export class InstancedStressStage implements BenchmarkStage {
   public readonly name = '500k Instanced Crystal Vortex';
   public readonly description =
     '500,000 GPU-instanced crystal octahedrons (4.0M triangles) driven by vertex-shader curl vortex fields and dynamic rim/specular lighting.';
-  public readonly weight = 0.25;
+  public readonly weight = 0.2;
 
   private readonly scene = new THREE.Scene();
   private readonly stageGroup = new THREE.Group();

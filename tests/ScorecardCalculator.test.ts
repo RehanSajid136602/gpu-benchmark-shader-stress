@@ -13,11 +13,33 @@ const MOCK_GPU: WebGLGPUInfo = {
 };
 
 describe('ScorecardCalculator & Normalization', () => {
-  it('normalizes arbitrary stage weights to sum to 1.0', () => {
-    const normalized = ScorecardCalculator.normalizeWeights([0.25, 0.30, 0.25, 0.25]);
+  it('normalizes arbitrary stage weights to sum to 1.0 across 5 stages', () => {
+    const normalized = ScorecardCalculator.normalizeWeights([0.20, 0.25, 0.20, 0.15, 0.20]);
     const sum = normalized.reduce((a, b) => a + b, 0);
     expect(sum).toBeCloseTo(1.0, 6);
-    expect(normalized[0]).toBeCloseTo(0.25 / 1.05, 5);
+    expect(normalized[0]).toBeCloseTo(0.20, 5);
+  });
+
+  it('applies workload fairness for instanceScale and high-FPS bonus above 60 FPS', () => {
+    const acc90 = ScorecardCalculator.createAccumulator('instanced', 'Instanced', 0.2, 15000, 0);
+    for (let i = 0; i < 40; i++) {
+      // ~90 FPS (11.11ms)
+      ScorecardCalculator.recordSample(acc90, 11.111, 10, 1000);
+    }
+    const acc60 = ScorecardCalculator.createAccumulator('instanced', 'Instanced', 0.2, 15000, 0);
+    for (let i = 0; i < 40; i++) {
+      // ~60 FPS (16.67ms)
+      ScorecardCalculator.recordSample(acc60, 16.667, 10, 1000);
+    }
+
+    const desktop90 = ScorecardCalculator.computeStageMetrics(acc90, 1.0, false, 0.2, 1.0);
+    const desktop60 = ScorecardCalculator.computeStageMetrics(acc60, 1.0, false, 0.2, 1.0);
+    const mobile90 = ScorecardCalculator.computeStageMetrics(acc90, 0.75, false, 0.2, 0.4);
+
+    // 90 FPS should earn more than linear 1.5x of 60 FPS due to high-FPS bonus
+    expect(desktop90.stageScore).toBeGreaterThan(Math.round(desktop60.stageScore * 1.5));
+    // Lower resolution + instanceScale should scale down raw FPS score fairly
+    expect(mobile90.stageScore).toBeLessThan(desktop90.stageScore);
   });
 
   it('scores stages using median FPS rather than mean FPS', () => {

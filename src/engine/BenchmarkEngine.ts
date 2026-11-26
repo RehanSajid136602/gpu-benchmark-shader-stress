@@ -132,6 +132,7 @@ export class BenchmarkEngine implements EngineController {
     const urlPreset = urlParams.get('preset');
     if (
       urlPreset === 'mobile' ||
+      urlPreset === 'tablet' ||
       urlPreset === 'laptop' ||
       urlPreset === 'desktop' ||
       urlPreset === 'extreme'

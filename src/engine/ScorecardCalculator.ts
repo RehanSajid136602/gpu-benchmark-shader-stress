@@ -94,6 +94,7 @@ export class ScorecardCalculator {
     resolutionScale: number,
     isFallbackGpu = false,
     normalizedWeight?: number,
+    instanceScale = 1.0,
   ): StageMetrics {
     const options: FrameStatsOptions = {
       isFallbackGpu,
@@ -141,13 +142,20 @@ export class ScorecardCalculator {
     const avgTriangles =
       acc.renderSampleCount > 0 ? Math.round(acc.trianglesSum / acc.renderSampleCount) : 0;
 
-    // Score uses MEDIAN FPS (not mean) + 1% low stability + resolution scale factor
+    // Score uses MEDIAN FPS (not mean) + 1% low stability + workload fairness + high-FPS bonus
     const effectiveFps = stats.medianFps * 0.70 + stats.onePercentLowFps * 0.30;
     const stabilityRatio =
       stats.medianFps > 0 ? Math.min(1, Math.max(0.25, stats.onePercentLowFps / stats.medianFps)) : 0.25;
     const stabilityMultiplier = 0.85 + 0.15 * stabilityRatio;
-    const scaleFactor = Math.pow(Math.max(0.5, resolutionScale), 1.15);
-    const stageScore = Math.round(effectiveFps * 100 * stabilityMultiplier * scaleFactor);
+    const resFactor = Math.pow(Math.max(0.5, resolutionScale), 1.15);
+    const clampedInstanceScale = Math.min(1.5, Math.max(0.25, instanceScale));
+    const instFactor = 0.55 + 0.45 * Math.pow(clampedInstanceScale, 0.85);
+    const workloadFactor = resFactor * instFactor;
+    const highFpsBonus =
+      effectiveFps > 60 ? 1 + 0.18 * Math.min(1.5, (effectiveFps - 60) / 60) : 1;
+    const stageScore = Math.round(
+      effectiveFps * 100 * stabilityMultiplier * workloadFactor * highFpsBonus,
+    );
 
     return {
       id: acc.id,
@@ -261,6 +269,7 @@ export class ScorecardCalculator {
         resolutionScale,
         gpu.isFallback,
         normalizedWeights[idx],
+        options.instanceScale,
       ),
     );
 

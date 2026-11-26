@@ -10,7 +10,7 @@ export class RaymarchFractalStage implements BenchmarkStage {
   public readonly name = 'Raymarched Mandelbulb & Nebula';
   public readonly description =
     'Full-screen WebGL2 raymarching of a 3D Mandelbulb + Menger fold hybrid with volumetric nebula scattering, AO, soft shadows, and iridescence.';
-  public readonly weight = 0.3;
+  public readonly weight = 0.25;
 
   private readonly scene = new THREE.Scene();
   private readonly orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);

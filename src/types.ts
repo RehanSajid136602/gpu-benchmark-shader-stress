@@ -7,11 +7,11 @@ export type { BoundVerdict } from './telemetry/GpuTimer.ts';
 
 export const APP_VERSION = '2.0.0';
 
-export type StageId = 'instanced' | 'raymarch' | 'water' | 'combined';
+export type StageId = 'instanced' | 'raymarch' | 'water' | 'combined' | 'volumetric';
 
 export type BenchmarkMode = 'benchmark' | 'sandbox';
 
-export type PresetId = 'mobile' | 'laptop' | 'desktop' | 'extreme' | 'custom';
+export type PresetId = 'mobile' | 'tablet' | 'laptop' | 'desktop' | 'extreme' | 'custom';
 
 export interface BenchmarkPreset {
   id: Exclude<PresetId, 'custom'>;
@@ -25,11 +25,19 @@ export interface BenchmarkPreset {
 export const BENCHMARK_PRESETS: Record<Exclude<PresetId, 'custom'>, BenchmarkPreset> = {
   mobile: {
     id: 'mobile',
-    label: 'Mobile',
+    label: 'Phone',
     description: '0.75× res · 40% instances · 10s/stage',
     resolutionScale: 0.75,
     instanceScale: 0.4,
     stageDurationSec: 10,
+  },
+  tablet: {
+    id: 'tablet',
+    label: 'Tablet',
+    description: '0.90× res · 65% instances · 12s/stage',
+    resolutionScale: 0.9,
+    instanceScale: 0.65,
+    stageDurationSec: 12,
   },
   laptop: {
     id: 'laptop',
@@ -255,7 +263,13 @@ export interface EngineController {
   dispose(): void;
 }
 
-export const STAGE_SEQUENCE: readonly StageId[] = ['instanced', 'raymarch', 'water', 'combined'] as const;
+export const STAGE_SEQUENCE: readonly StageId[] = [
+  'instanced',
+  'raymarch',
+  'water',
+  'combined',
+  'volumetric',
+] as const;
 
 export const DEFAULT_STAGE_DURATION_SEC = 15;
 
