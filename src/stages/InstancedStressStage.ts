@@ -63,6 +63,8 @@ export class InstancedStressStage implements BenchmarkStage {
   private overlayMode = false;
   private initialized = false;
   private disposed = false;
+  private instanceScale = 1.0;
+  private seedOffsetSec = 0;
 
   public init(_renderer: THREE.WebGLRenderer, _width: number, _height: number): void {
     if (this.initialized || this.disposed) return;
@@ -122,6 +124,17 @@ export class InstancedStressStage implements BenchmarkStage {
     // Kept for BenchmarkStage compatibility.
   }
 
+  public setSeed(seed: number): void {
+    this.seedOffsetSec = ((seed >>> 0) % 1000) * 0.006283185;
+  }
+
+  public setInstanceScale(scale: number): void {
+    this.instanceScale = Math.max(0.25, Math.min(1.0, Number.isFinite(scale) ? scale : 1.0));
+    if (this.instancedMesh) {
+      this.instancedMesh.count = Math.max(10_000, Math.round(INSTANCE_COUNT * this.instanceScale));
+    }
+  }
+
   public update(
     elapsedSec: number,
     _deltaSec: number,
@@ -129,13 +142,14 @@ export class InstancedStressStage implements BenchmarkStage {
     isSandbox: boolean,
   ): void {
     if (!this.initialized || this.disposed) return;
+    const t = elapsedSec + this.seedOffsetSec;
 
     for (let i = 0; i < this.lightOrbs.length; i++) {
       const orb = this.lightOrbs[i]!;
-      const angle = elapsedSec * orb.speed + orb.phase;
+      const angle = t * orb.speed + orb.phase;
       const x = Math.cos(angle) * orb.radius;
       const z = Math.sin(angle) * orb.radius;
-      const y = Math.sin(elapsedSec * 1.15 + orb.phase * 1.7) * orb.heightAmp;
+      const y = Math.sin(t * 1.15 + orb.phase * 1.7) * orb.heightAmp;
 
       orb.mesh.position.set(x, y, z);
       orb.halo.position.set(x, y, z);
@@ -304,6 +318,7 @@ export class InstancedStressStage implements BenchmarkStage {
     });
 
     const mesh = new THREE.InstancedMesh(geometry, material, INSTANCE_COUNT);
+    mesh.count = Math.max(10_000, Math.round(INSTANCE_COUNT * this.instanceScale));
     mesh.frustumCulled = false;
     const matrixArray = mesh.instanceMatrix.array as Float32Array;
 

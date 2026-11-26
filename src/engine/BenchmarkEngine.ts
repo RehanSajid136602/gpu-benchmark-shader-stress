@@ -3,7 +3,9 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { GpuTimer } from '../telemetry/GpuTimer.ts';
 import {
+  BENCHMARK_PRESETS,
   DEFAULT_SANDBOX_PASSES,
   DEFAULT_STAGE_DURATION_SEC,
   STAGE_SEQUENCE,
@@ -12,13 +14,17 @@ import {
   type BenchmarkResult,
   type BenchmarkStage,
   type EngineController,
+  type PresetId,
   type SandboxPasses,
+  type StabilityLoopSample,
+  type StabilityReport,
   type StageDescriptor,
   type StageId,
   type TelemetrySnapshot,
   type UICallbacks,
   type WebGLGPUInfo,
 } from '../types.ts';
+import { parseOrGenerateSeed } from '../utils/prng.ts';
 import { ScorecardCalculator, type StageSampleAccumulator } from './ScorecardCalculator.ts';
 
 export interface BenchmarkEngineOptions {
@@ -48,6 +54,7 @@ export class BenchmarkEngine implements EngineController {
   private readonly camera: THREE.PerspectiveCamera;
   private readonly controls: OrbitControls;
   private readonly gpuInfo: WebGLGPUInfo;
+  private readonly gpuTimer: GpuTimer;
 
   private readonly stageMap = new Map<StageId, BenchmarkStage>();
   private readonly stageOrder: StageId[] = [];
@@ -57,11 +64,17 @@ export class BenchmarkEngine implements EngineController {
   private resizeObserver: ResizeObserver | null = null;
   private rafId: number | null = null;
   private disposed = false;
+  private contextLost = false;
 
   private viewportWidth = 1280;
   private viewportHeight = 720;
   private resolutionScale = 1.0;
+  private instanceScale = 1.0;
   private effectivePixelRatio = 1.0;
+  private lastKnownRawDpr = window.devicePixelRatio || 1;
+  private presetId: PresetId = 'desktop';
+  private seed: number;
+  private hasExplicitSeed = false;
 
   private mode: BenchmarkMode = 'benchmark';
   private sandboxPasses: SandboxPasses = { ...DEFAULT_SANDBOX_PASSES };
@@ -75,6 +88,15 @@ export class BenchmarkEngine implements EngineController {
   private totalElapsedSec = 0;
   private stageAccumulators: StageSampleAccumulator[] = [];
   private lastResult: BenchmarkResult | null = null;
+  private runInvalidated = false;
+
+  // Stability loop state
+  private stabilityMode = false;
+  private stabilityTargetMinutes: 5 | 10 = 5;
+  private stabilityTargetSec = 300;
+  private stabilityElapsedSec = 0;
+  private stabilityLoopIndex = 0;
+  private stabilitySamples: StabilityLoopSample[] = [];
 
   // Timing & telemetry
   private lastFrameTimestampMs = 0;
@@ -103,6 +125,33 @@ export class BenchmarkEngine implements EngineController {
     this.resolutionScale = clampResolutionScale(options.initialResolutionScale ?? 1.0);
 
     const urlParams = new URLSearchParams(window.location.search);
+    const urlSeed = urlParams.get('seed');
+    this.hasExplicitSeed = urlSeed !== null && urlSeed.trim() !== '';
+    this.seed = parseOrGenerateSeed(urlSeed);
+
+    const urlPreset = urlParams.get('preset');
+    if (
+      urlPreset === 'mobile' ||
+      urlPreset === 'laptop' ||
+      urlPreset === 'desktop' ||
+      urlPreset === 'extreme'
+    ) {
+      const preset = BENCHMARK_PRESETS[urlPreset];
+      this.presetId = preset.id;
+      this.resolutionScale = preset.resolutionScale;
+      this.instanceScale = preset.instanceScale;
+      this.defaultStageDurationSec = preset.stageDurationSec;
+    }
+
+    const urlRes = urlParams.get('res');
+    if (urlRes !== null) {
+      const parsedRes = Number(urlRes);
+      if (Number.isFinite(parsedRes) && parsedRes > 0) {
+        this.resolutionScale = clampResolutionScale(parsedRes);
+        if (urlPreset === null) this.presetId = 'custom';
+      }
+    }
+
     const urlStageDuration = urlParams.get('stageDuration');
     if (urlStageDuration !== null) {
       const parsed = Number(urlStageDuration);
@@ -148,7 +197,16 @@ export class BenchmarkEngine implements EngineController {
       this.callbacks.onError?.(msg);
       throw new Error(msg);
     }
+
+    this.gpuTimer = new GpuTimer(gl);
     this.gpuInfo = this.detectGPUInfo(gl);
+
+    // Cap extreme workload on software rasterizers unless user explicitly forced a preset/res
+    if (this.gpuInfo.isFallback && urlPreset === null && urlRes === null) {
+      this.presetId = 'mobile';
+      this.resolutionScale = BENCHMARK_PRESETS.mobile.resolutionScale;
+      this.instanceScale = BENCHMARK_PRESETS.mobile.instanceScale;
+    }
 
     this.renderer = new THREE.WebGLRenderer({
       canvas: this.canvas,
@@ -198,14 +256,27 @@ export class BenchmarkEngine implements EngineController {
     }
 
     this.setupResizeHandling();
+    this.canvas.addEventListener('webglcontextlost', this.handleContextLost);
+    this.canvas.addEventListener('webglcontextrestored', this.handleContextRestored);
+    document.addEventListener('visibilitychange', this.handleVisibilityChange);
+
     this.callbacks.onGPUInfo?.(this.gpuInfo);
     this.callbacks.onModeChange?.(this.mode);
     this.callbacks.onSandboxPassesChange?.({ ...this.sandboxPasses });
     this.callbacks.onResolutionScaleChange?.(this.resolutionScale);
+    this.callbacks.onPresetChange?.(this.presetId);
     this.callbacks.onProgress?.(this.getProgress());
 
     this.lastFrameTimestampMs = performance.now();
     this.scheduleNextFrame();
+
+    if (urlParams.get('autorun') === '1') {
+      queueMicrotask(() => {
+        if (!this.disposed) {
+          this.startBenchmark();
+        }
+      });
+    }
   }
 
   public setUICallbacks(callbacks: UICallbacks): void {
@@ -214,6 +285,7 @@ export class BenchmarkEngine implements EngineController {
     this.callbacks.onModeChange?.(this.mode);
     this.callbacks.onSandboxPassesChange?.({ ...this.sandboxPasses });
     this.callbacks.onResolutionScaleChange?.(this.resolutionScale);
+    this.callbacks.onPresetChange?.(this.presetId);
     this.callbacks.onProgress?.(this.getProgress());
   }
 
@@ -310,8 +382,48 @@ export class BenchmarkEngine implements EngineController {
     const clamped = clampResolutionScale(scale);
     if (Math.abs(clamped - this.resolutionScale) < 0.001) return;
     this.resolutionScale = clamped;
+    this.presetId = 'custom';
     this.applyRendererSize();
     this.callbacks.onResolutionScaleChange?.(this.resolutionScale);
+    this.callbacks.onPresetChange?.(this.presetId);
+  }
+
+  public applyPreset(presetId: Exclude<PresetId, 'custom'>): void {
+    const preset = BENCHMARK_PRESETS[presetId];
+    if (!preset) return;
+    this.presetId = preset.id;
+    this.resolutionScale = preset.resolutionScale;
+    this.instanceScale = preset.instanceScale;
+    this.defaultStageDurationSec = preset.stageDurationSec;
+    this.activeStageDurationSec = preset.stageDurationSec;
+
+    for (const id of this.initializedStages) {
+      this.stageMap.get(id)?.setInstanceScale?.(this.instanceScale);
+    }
+    this.applyRendererSize();
+    this.callbacks.onResolutionScaleChange?.(this.resolutionScale);
+    this.callbacks.onPresetChange?.(this.presetId);
+    this.callbacks.onProgress?.(this.getProgress());
+  }
+
+  public getPresetId(): PresetId {
+    return this.presetId;
+  }
+
+  public getInstanceScale(): number {
+    return this.instanceScale;
+  }
+
+  public getSeed(): number {
+    return this.seed;
+  }
+
+  public setSeed(seed: number): void {
+    this.seed = (seed >>> 0) || 1;
+    this.hasExplicitSeed = true;
+    for (const id of this.initializedStages) {
+      this.stageMap.get(id)?.setSeed?.(this.seed);
+    }
   }
 
   public getLastResult(): BenchmarkResult | null {
@@ -334,11 +446,35 @@ export class BenchmarkEngine implements EngineController {
         ? Math.min(this.totalElapsedSec, this.activeStageDurationSec * stageCount)
         : 0,
       totalDurationSec: this.activeStageDurationSec * stageCount,
+      stabilityMode: this.stabilityMode,
+      stabilityLoopIndex: this.stabilityMode ? this.stabilityLoopIndex : undefined,
+      stabilityTargetSec: this.stabilityMode ? this.stabilityTargetSec : undefined,
+      stabilityElapsedSec: this.stabilityMode ? this.stabilityElapsedSec : undefined,
     };
   }
 
   public startBenchmark(stageDurationSec?: number): void {
-    if (this.disposed || this.stageOrder.length === 0) return;
+    this.beginRun(false, stageDurationSec);
+  }
+
+  public startStabilityTest(durationMinutes: 5 | 10): void {
+    this.stabilityTargetMinutes = durationMinutes;
+    this.stabilityTargetSec = durationMinutes * 60;
+    this.stabilityElapsedSec = 0;
+    this.stabilityLoopIndex = 1;
+    this.stabilitySamples = [];
+    this.beginRun(true);
+  }
+
+  private beginRun(isStability: boolean, stageDurationSec?: number): void {
+    if (this.disposed || this.contextLost || this.stageOrder.length === 0) return;
+
+    this.stabilityMode = isStability;
+    this.runInvalidated = false;
+
+    if (!this.hasExplicitSeed && !isStability) {
+      this.seed = parseOrGenerateSeed(null);
+    }
 
     this.activeStageDurationSec =
       typeof stageDurationSec === 'number' && Number.isFinite(stageDurationSec) && stageDurationSec > 0
@@ -352,19 +488,13 @@ export class BenchmarkEngine implements EngineController {
 
     this.controls.enabled = false;
     this.benchmarkRunning = true;
-    this.benchmarkStageIndex = 0;
-    this.stageElapsedSec = 0;
-    this.totalElapsedSec = 0;
-    this.rollingFrameTimesMs.length = 0;
-
-    this.stageAccumulators = this.stageOrder.map((id) => {
-      const stage = this.stageMap.get(id)!;
-      return ScorecardCalculator.createAccumulator(stage.id, stage.name, stage.weight);
-    });
+    this.resetStageAccumulators();
 
     // Pre-initialize all stages up front so allocation/setup doesn't skew stage frame times
     for (const id of this.stageOrder) {
-      this.ensureStageInitialized(id);
+      const s = this.ensureStageInitialized(id);
+      s?.setSeed?.(this.seed);
+      s?.setInstanceScale?.(this.instanceScale);
     }
 
     this.enterBenchmarkStage(0);
@@ -372,12 +502,28 @@ export class BenchmarkEngine implements EngineController {
     this.callbacks.onProgress?.(this.getProgress());
   }
 
-  public stopBenchmark(): void {
-    if (!this.benchmarkRunning) return;
-    this.benchmarkRunning = false;
+  private resetStageAccumulators(): void {
     this.benchmarkStageIndex = 0;
     this.stageElapsedSec = 0;
     this.totalElapsedSec = 0;
+    this.rollingFrameTimesMs.length = 0;
+    this.gpuTimer.resetStageStats();
+
+    const expectedMs = this.activeStageDurationSec * 1000;
+    this.stageAccumulators = this.stageOrder.map((id) => {
+      const stage = this.stageMap.get(id)!;
+      return ScorecardCalculator.createAccumulator(stage.id, stage.name, stage.weight, expectedMs);
+    });
+  }
+
+  public stopBenchmark(): void {
+    if (!this.benchmarkRunning) return;
+    this.benchmarkRunning = false;
+    this.stabilityMode = false;
+    this.benchmarkStageIndex = 0;
+    this.stageElapsedSec = 0;
+    this.totalElapsedSec = 0;
+    this.gpuTimer.resetStageStats();
     if (this.mode === 'benchmark') {
       this.enterBenchmarkStage(0);
     }
@@ -416,7 +562,11 @@ export class BenchmarkEngine implements EngineController {
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     window.removeEventListener('resize', this.handleWindowResize);
+    this.canvas.removeEventListener('webglcontextlost', this.handleContextLost);
+    this.canvas.removeEventListener('webglcontextrestored', this.handleContextRestored);
+    document.removeEventListener('visibilitychange', this.handleVisibilityChange);
 
+    this.gpuTimer.dispose();
     this.controls.dispose();
 
     for (const stage of this.stageMap.values()) {
@@ -441,6 +591,50 @@ export class BenchmarkEngine implements EngineController {
       this.container.removeChild(this.canvas);
     }
   }
+
+  private readonly handleContextLost = (event: Event): void => {
+    event.preventDefault();
+    this.contextLost = true;
+
+    if (this.benchmarkRunning) {
+      this.runInvalidated = true;
+      const acc = this.stageAccumulators[this.benchmarkStageIndex];
+      if (acc) acc.contextLost = true;
+      this.benchmarkRunning = false;
+      this.stabilityMode = false;
+      this.callbacks.onProgress?.(this.getProgress());
+      this.callbacks.onBenchmarkStopped?.();
+    }
+
+    this.callbacks.onContextLost?.(
+      'WebGL2 context was lost (GPU reset or driver timeout). Active run aborted and marked invalid.',
+    );
+  };
+
+  private readonly handleContextRestored = (): void => {
+    this.contextLost = false;
+    this.initializedStages.clear();
+    this.applyRendererSize();
+    const firstId = this.stageOrder[0];
+    if (firstId) {
+      const stage = this.ensureStageInitialized(firstId);
+      if (stage) {
+        this.applyCameraPreset(stage.getCameraPreset());
+      }
+    }
+    this.lastFrameTimestampMs = performance.now();
+    this.callbacks.onContextRestored?.();
+  };
+
+  private readonly handleVisibilityChange = (): void => {
+    if (document.hidden && this.benchmarkRunning) {
+      this.runInvalidated = true;
+      const acc = this.stageAccumulators[this.benchmarkStageIndex];
+      if (acc) acc.tabHidden = true;
+    } else if (!document.hidden) {
+      this.lastFrameTimestampMs = performance.now();
+    }
+  };
 
   private detectGPUInfo(gl: WebGL2RenderingContext): WebGLGPUInfo {
     const debugExt = gl.getExtension('WEBGL_debug_renderer_info');
@@ -468,6 +662,7 @@ export class BenchmarkEngine implements EngineController {
       webglVersion,
       maxTextureSize,
       isFallback,
+      timerQueryAvailable: this.gpuTimer.isAvailable(),
     };
   }
 
@@ -477,6 +672,8 @@ export class BenchmarkEngine implements EngineController {
     if (!this.initializedStages.has(id)) {
       stage.init(this.renderer, this.viewportWidth, this.viewportHeight);
       stage.resize(this.viewportWidth, this.viewportHeight);
+      stage.setSeed?.(this.seed);
+      stage.setInstanceScale?.(this.instanceScale);
       this.initializedStages.add(id);
       if (!this.benchmarkRunning) {
         this.sandboxJustInitialized = true;
@@ -533,7 +730,16 @@ export class BenchmarkEngine implements EngineController {
   };
 
   private applyRendererSize(): void {
-    const baseDpr = Math.min(window.devicePixelRatio || 1, 2);
+    const rawDpr = window.devicePixelRatio || 1;
+    if (Math.abs(rawDpr - this.lastKnownRawDpr) > 0.01) {
+      this.lastKnownRawDpr = rawDpr;
+      if (this.benchmarkRunning) {
+        const acc = this.stageAccumulators[this.benchmarkStageIndex];
+        if (acc) acc.dprChanged = true;
+      }
+    }
+
+    const baseDpr = Math.min(rawDpr, 2);
     let desiredDpr = baseDpr * this.resolutionScale;
 
     // Guard against exceeding WebGL MAX_TEXTURE_SIZE at extreme scales
@@ -586,7 +792,6 @@ export class BenchmarkEngine implements EngineController {
     );
     this.sandboxOutputPass = new OutputPass();
 
-    // No RenderPass here: we render composed Sandbox stages into composer.readBuffer
     this.sandboxComposer.addPass(this.sandboxBloomPass);
     this.sandboxComposer.addPass(this.sandboxOutputPass);
   }
@@ -595,7 +800,7 @@ export class BenchmarkEngine implements EngineController {
     this.sandboxLightsScene.background = null;
     this.sandboxLightsScene.add(this.sandboxAmbientLight);
 
-    const orbColors = [0x38bdf8, 0xf59e0b, 0xec4899, 0x22c55e];
+    const orbColors = [0x38bdf8, 0xf5b841, 0xff5d47, 0x34d399];
     const orbGeo = new THREE.SphereGeometry(0.32, 20, 20);
     this.sandboxDisposables.push(orbGeo);
 
@@ -615,11 +820,10 @@ export class BenchmarkEngine implements EngineController {
         radius: 6.5 + (i % 2) * 3.0,
         speed: 0.75 + i * 0.22,
         phase: (i * Math.PI) / 2,
-        yOffset: (i % 2 === 0 ? 1.8 : -0.6),
+        yOffset: i % 2 === 0 ? 1.8 : -0.6,
       });
     }
 
-    // Sleek centerpiece used only when dynamicLights is enabled without 3D stage meshes
     const coreGeo = new THREE.IcosahedronGeometry(2.1, 2);
     const coreMat = new THREE.MeshStandardMaterial({
       color: 0x111827,
@@ -649,10 +853,12 @@ export class BenchmarkEngine implements EngineController {
     const stage = this.ensureStageInitialized(id);
     if (!stage) return;
 
+    this.gpuTimer.resetStageStats();
     stage.setBackgroundMode?.(false);
     stage.setOverlayMode?.(false);
     stage.setLightsEnabled?.(true);
     this.applyCameraPreset(stage.getCameraPreset());
+    this.callbacks.onStageTransition?.(index, stage.id, stage.name);
   }
 
   private syncSandboxStageSettings(): void {
@@ -686,14 +892,28 @@ export class BenchmarkEngine implements EngineController {
 
   private readonly tick = (nowMs: number): void => {
     if (this.disposed) return;
+    if (this.contextLost) {
+      this.scheduleNextFrame();
+      return;
+    }
+
+    // Detect mid-run DPR changes without layout thrash
+    const rawDpr = window.devicePixelRatio || 1;
+    if (Math.abs(rawDpr - this.lastKnownRawDpr) > 0.01) {
+      this.applyRendererSize();
+    }
 
     const rawFrameTimeMs = Math.max(0.1, nowMs - this.lastFrameTimestampMs);
     this.lastFrameTimestampMs = nowMs;
     const deltaSec = Math.min(rawFrameTimeMs / 1000, 0.25);
 
+    // Non-stalling poll of previous GPU timer queries
+    this.gpuTimer.poll();
+
     // CRITICAL: reset renderer.info once at frame start so multi-pass stages accumulate cleanly
     this.renderer.info.reset();
 
+    this.gpuTimer.beginFrame();
     if (this.benchmarkRunning) {
       this.tickBenchmarkFrame(rawFrameTimeMs, deltaSec);
     } else if (this.mode === 'sandbox') {
@@ -701,6 +921,7 @@ export class BenchmarkEngine implements EngineController {
     } else {
       this.tickIdleBenchmarkPreview(deltaSec);
     }
+    this.gpuTimer.endFrame();
 
     const drawCalls = this.renderer.info.render.calls;
     const triangles = this.renderer.info.render.triangles;
@@ -720,6 +941,9 @@ export class BenchmarkEngine implements EngineController {
 
     this.stageElapsedSec += rawFrameTimeMs / 1000;
     this.totalElapsedSec += rawFrameTimeMs / 1000;
+    if (this.stabilityMode) {
+      this.stabilityElapsedSec += rawFrameTimeMs / 1000;
+    }
 
     this.renderer.autoClear = true;
     stage.update(this.stageElapsedSec, deltaSec, this.camera, false);
@@ -728,6 +952,9 @@ export class BenchmarkEngine implements EngineController {
 
     const acc = this.stageAccumulators[this.benchmarkStageIndex];
     if (acc) {
+      if (document.hidden) {
+        acc.tabHidden = true;
+      }
       ScorecardCalculator.recordSample(
         acc,
         rawFrameTimeMs,
@@ -739,6 +966,11 @@ export class BenchmarkEngine implements EngineController {
     this.callbacks.onProgress?.(this.getProgress());
 
     if (this.stageElapsedSec >= this.activeStageDurationSec) {
+      if (acc) {
+        const summary = acc.collector.summarize();
+        acc.gpuStats = this.gpuTimer.summarizeStage(summary.medianFrameTimeMs);
+      }
+
       const nextIndex = this.benchmarkStageIndex + 1;
       if (nextIndex < this.stageOrder.length) {
         this.benchmarkStageIndex = nextIndex;
@@ -753,21 +985,88 @@ export class BenchmarkEngine implements EngineController {
   }
 
   private finishBenchmarkRun(): void {
-    this.benchmarkRunning = false;
     const totalRunDurationSec = this.activeStageDurationSec * this.stageOrder.length;
     const result = ScorecardCalculator.buildResult(
       this.stageAccumulators,
       totalRunDurationSec,
       this.resolutionScale,
       this.gpuInfo,
+      {
+        seed: this.seed,
+        presetId: this.presetId,
+        instanceScale: this.instanceScale,
+        invalidated: this.runInvalidated,
+      },
     );
     this.lastResult = result;
+
+    if (this.stabilityMode) {
+      this.stabilitySamples.push({
+        loopIndex: this.stabilityLoopIndex,
+        elapsedSec: Math.round(this.stabilityElapsedSec * 10) / 10,
+        compositeScore: result.compositeScore,
+        medianFps: result.overallMedianFps,
+        confidence: result.confidence,
+      });
+
+      if (this.stabilityElapsedSec < this.stabilityTargetSec) {
+        this.stabilityLoopIndex += 1;
+        this.resetStageAccumulators();
+        this.enterBenchmarkStage(0);
+        this.lastFrameTimestampMs = performance.now();
+        this.callbacks.onProgress?.(this.getProgress());
+        return;
+      }
+
+      const report = this.buildStabilityReport();
+      this.stabilityMode = false;
+      this.benchmarkRunning = false;
+      this.benchmarkStageIndex = 0;
+      this.stageElapsedSec = 0;
+      this.totalElapsedSec = 0;
+      this.enterBenchmarkStage(0);
+      this.callbacks.onProgress?.(this.getProgress());
+      this.callbacks.onStabilityComplete?.(report);
+      return;
+    }
+
+    this.benchmarkRunning = false;
     this.benchmarkStageIndex = 0;
     this.stageElapsedSec = 0;
     this.totalElapsedSec = 0;
     this.enterBenchmarkStage(0);
     this.callbacks.onProgress?.(this.getProgress());
     this.callbacks.onBenchmarkComplete?.(result);
+  }
+
+  private buildStabilityReport(): StabilityReport {
+    const samples = [...this.stabilitySamples];
+    const peakScore = samples.reduce((m, s) => Math.max(m, s.compositeScore), 0);
+    const lastScore = samples[samples.length - 1]?.compositeScore ?? 0;
+    const tailCount = Math.max(1, Math.ceil(samples.length / 3));
+    const tailSlice = samples.slice(samples.length - tailCount);
+    const sustainedScore = Math.round(
+      tailSlice.reduce((sum, s) => sum + s.compositeScore, 0) / tailSlice.length,
+    );
+    const sustainedRatio = peakScore > 0 ? Math.round((sustainedScore / peakScore) * 1000) / 1000 : 1;
+    const throttled = sustainedRatio < 0.88;
+    const verdict = throttled
+      ? `Thermal/power throttling detected (${Math.round((1 - sustainedRatio) * 100)}% drop from peak ${peakScore} to sustained ${sustainedScore}).`
+      : `Thermally stable (${Math.round(sustainedRatio * 100)}% sustained vs peak; final loop ${lastScore}).`;
+
+    return {
+      id: `stab-${Date.now().toString(36)}`,
+      timestamp: new Date().toISOString(),
+      targetDurationMin: this.stabilityTargetMinutes,
+      actualDurationSec: Math.round(this.stabilityElapsedSec * 10) / 10,
+      loopsCompleted: samples.length,
+      peakScore,
+      sustainedScore,
+      sustainedRatio,
+      throttled,
+      verdict,
+      samples,
+    };
   }
 
   private tickIdleBenchmarkPreview(deltaSec: number): void {
@@ -820,7 +1119,6 @@ export class BenchmarkEngine implements EngineController {
 
     let hasRenderedColorLayer = false;
 
-    // 1. Camera-synced raymarch backdrop pass
     if (raymarchShader) {
       const raymarchStage = this.ensureStageInitialized('raymarch');
       if (raymarchStage) {
@@ -832,7 +1130,6 @@ export class BenchmarkEngine implements EngineController {
       }
     }
 
-    // 2. Water refraction & caustics pass (with internal reflection/refraction FBOs)
     if (waterCaustics) {
       const waterStage = this.ensureStageInitialized('water');
       if (waterStage) {
@@ -842,7 +1139,6 @@ export class BenchmarkEngine implements EngineController {
       }
     }
 
-    // 3. 500k Instanced mesh geometry stress pass (shares depth buffer with water stage)
     if (instancedMesh) {
       const instancedStage = this.ensureStageInitialized('instanced');
       if (instancedStage) {
@@ -852,7 +1148,6 @@ export class BenchmarkEngine implements EngineController {
       }
     }
 
-    // 4. Orbiting dynamic lights & optional fallback geometry if no 3D mesh or raymarch pass is active
     if (dynamicLights) {
       this.updateSandboxLightsRig(
         this.sandboxElapsedSec,
@@ -868,7 +1163,6 @@ export class BenchmarkEngine implements EngineController {
 
     this.renderer.autoClear = prevAutoClear;
 
-    // 5. Optional UnrealBloom post-processing pass
     if (useBloom) {
       this.sandboxComposer!.render(deltaSec);
     } else {
@@ -926,6 +1220,7 @@ export class BenchmarkEngine implements EngineController {
       fps: Math.round(fps * 10) / 10,
       frameTimeMs: Math.round(rawFrameTimeMs * 100) / 100,
       onePercentLowFps: Math.round(onePercentLowFps * 10) / 10,
+      gpuTimeMs: this.gpuTimer.getLastGpuTimeMs(),
       drawCalls,
       triangles,
       resolutionWidth: this.renderer.domElement.width,

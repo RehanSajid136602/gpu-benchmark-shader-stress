@@ -560,7 +560,7 @@ export class CombinedBloomStage implements BenchmarkStage {
   public readonly name = 'Combined Bloom & Dynamic Lighting';
   public readonly description =
     'Combines instanced monolith rings & 48k shards, glowing GLSL plasma core, planar mirror deck with caustics, 6 dynamic lights, and UnrealBloom.';
-  public readonly weight = 0.25;
+  public readonly weight = 0.20;
 
   private readonly scene = new THREE.Scene();
   private readonly stageGroup = new THREE.Group();

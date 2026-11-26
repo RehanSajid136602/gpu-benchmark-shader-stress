@@ -1,29 +1,62 @@
-import type {
-  BenchmarkResult,
-  HardwareTier,
-  StageId,
-  StageMetrics,
-  WebGLGPUInfo,
+import {
+  analyzeFrameTimes,
+  combineConfidence,
+  DEFAULT_WARMUP_MS,
+  FrameStatsCollector,
+  type FrameStatsOptions,
+} from '../telemetry/FrameStats.ts';
+import type { BoundVerdict, GpuTimerStats } from '../telemetry/GpuTimer.ts';
+import {
+  APP_VERSION,
+  type BenchmarkResult,
+  type ConfidenceRating,
+  type HardwareTier,
+  type PresetId,
+  type StageId,
+  type StageMetrics,
+  type WebGLGPUInfo,
 } from '../types.ts';
 
 export interface StageSampleAccumulator {
   id: StageId;
   name: string;
   weight: number;
-  frameTimesMs: number[];
+  collector: FrameStatsCollector;
   drawCallsSum: number;
   trianglesSum: number;
+  renderSampleCount: number;
+  gpuStats?: GpuTimerStats;
+  tabHidden: boolean;
+  contextLost: boolean;
+  dprChanged: boolean;
+}
+
+export interface BuildResultOptions {
+  seed: number;
+  presetId: PresetId;
+  instanceScale: number;
+  invalidated?: boolean;
 }
 
 export class ScorecardCalculator {
-  public static createAccumulator(id: StageId, name: string, weight: number): StageSampleAccumulator {
+  public static createAccumulator(
+    id: StageId,
+    name: string,
+    weight: number,
+    expectedStageDurationMs?: number,
+    warmupMs = DEFAULT_WARMUP_MS,
+  ): StageSampleAccumulator {
     return {
       id,
       name,
       weight,
-      frameTimesMs: [],
+      collector: new FrameStatsCollector(warmupMs, expectedStageDurationMs),
       drawCallsSum: 0,
       trianglesSum: 0,
+      renderSampleCount: 0,
+      tabHidden: false,
+      contextLost: false,
+      dprChanged: false,
     };
   }
 
@@ -33,69 +66,85 @@ export class ScorecardCalculator {
     drawCalls: number,
     triangles: number,
   ): void {
-    // Clamp pathological zero/negative durations while preserving genuine slow frames
-    const clampedMs = Math.max(0.1, Math.min(frameTimeMs, 10_000));
-    acc.frameTimesMs.push(clampedMs);
-    acc.drawCallsSum += drawCalls;
-    acc.trianglesSum += triangles;
+    const kept = acc.collector.record(frameTimeMs);
+    if (kept) {
+      acc.drawCallsSum += drawCalls;
+      acc.trianglesSum += triangles;
+      acc.renderSampleCount += 1;
+    }
   }
 
   public static computeOnePercentLowFps(frameTimesMs: readonly number[]): number {
     if (frameTimesMs.length === 0) return 0;
-    const sorted = [...frameTimesMs].sort((a, b) => a - b);
-    const idx = Math.min(
-      sorted.length - 1,
-      Math.max(0, Math.ceil(0.99 * sorted.length) - 1),
-    );
-    const p99Ms = sorted[idx] ?? 0;
-    return p99Ms > 0 ? 1000 / p99Ms : 0;
+    const summary = analyzeFrameTimes(frameTimesMs);
+    return summary.onePercentLowFps;
+  }
+
+  public static normalizeWeights(weights: readonly number[]): number[] {
+    const sum = weights.reduce((acc, w) => acc + (Number.isFinite(w) && w > 0 ? w : 0), 0);
+    if (sum <= 0) {
+      const equal = weights.length > 0 ? 1 / weights.length : 0;
+      return weights.map(() => equal);
+    }
+    return weights.map((w) => (Number.isFinite(w) && w > 0 ? w / sum : 0));
   }
 
   public static computeStageMetrics(
     acc: StageSampleAccumulator,
     resolutionScale: number,
+    isFallbackGpu = false,
+    normalizedWeight?: number,
   ): StageMetrics {
-    const sampleCount = acc.frameTimesMs.length;
-    if (sampleCount === 0) {
+    const options: FrameStatsOptions = {
+      isFallbackGpu,
+      tabHidden: acc.tabHidden,
+      contextLost: acc.contextLost,
+      dprChanged: acc.dprChanged,
+    };
+    const stats = acc.collector.summarize(options);
+    const weight = normalizedWeight ?? acc.weight;
+
+    if (stats.sampleCount === 0) {
       return {
         id: acc.id,
         name: acc.name,
-        weight: acc.weight,
+        weight: round3(weight),
         avgFps: 0,
+        medianFps: 0,
         minFps: 0,
         maxFps: 0,
         onePercentLowFps: 0,
         avgFrameTimeMs: 0,
+        medianFrameTimeMs: 0,
+        p95FrameTimeMs: 0,
+        p99FrameTimeMs: 0,
+        madMs: 0,
+        cv: 0,
+        stutterCount: 0,
+        throttled: false,
+        vsyncPinned: false,
+        vsyncTargetHz: null,
+        confidence: stats.confidence,
+        warnings: stats.warnings,
+        gpuTimeMs: acc.gpuStats?.medianGpuTimeMs ?? null,
+        boundVerdict: acc.gpuStats?.boundVerdict ?? 'unavailable',
         avgDrawCalls: 0,
         avgTriangles: 0,
         stageScore: 0,
         sampleCount: 0,
+        warmupDiscardedCount: stats.warmupDiscardedCount,
       };
     }
 
-    let totalMs = 0;
-    let minMs = Number.POSITIVE_INFINITY;
-    let maxMs = 0;
+    const avgDrawCalls =
+      acc.renderSampleCount > 0 ? Math.round(acc.drawCallsSum / acc.renderSampleCount) : 0;
+    const avgTriangles =
+      acc.renderSampleCount > 0 ? Math.round(acc.trianglesSum / acc.renderSampleCount) : 0;
 
-    for (let i = 0; i < sampleCount; i++) {
-      const ms = acc.frameTimesMs[i]!;
-      totalMs += ms;
-      if (ms < minMs) minMs = ms;
-      if (ms > maxMs) maxMs = ms;
-    }
-
-    const avgFrameTimeMs = totalMs / sampleCount;
-    const avgFps = avgFrameTimeMs > 0 ? 1000 / avgFrameTimeMs : 0;
-    const minFps = maxMs > 0 ? 1000 / maxMs : 0;
-    const maxFps = minMs > 0 ? 1000 / minMs : 0;
-    const onePercentLowFps = ScorecardCalculator.computeOnePercentLowFps(acc.frameTimesMs);
-
-    const avgDrawCalls = Math.round(acc.drawCallsSum / sampleCount);
-    const avgTriangles = Math.round(acc.trianglesSum / sampleCount);
-
-    // Weighted FPS emphasizing frame-time consistency (1% low) and resolution scale load
-    const effectiveFps = avgFps * 0.65 + onePercentLowFps * 0.35;
-    const stabilityRatio = avgFps > 0 ? Math.min(1, Math.max(0.25, onePercentLowFps / avgFps)) : 0.25;
+    // Score uses MEDIAN FPS (not mean) + 1% low stability + resolution scale factor
+    const effectiveFps = stats.medianFps * 0.70 + stats.onePercentLowFps * 0.30;
+    const stabilityRatio =
+      stats.medianFps > 0 ? Math.min(1, Math.max(0.25, stats.onePercentLowFps / stats.medianFps)) : 0.25;
     const stabilityMultiplier = 0.85 + 0.15 * stabilityRatio;
     const scaleFactor = Math.pow(Math.max(0.5, resolutionScale), 1.15);
     const stageScore = Math.round(effectiveFps * 100 * stabilityMultiplier * scaleFactor);
@@ -103,16 +152,31 @@ export class ScorecardCalculator {
     return {
       id: acc.id,
       name: acc.name,
-      weight: acc.weight,
-      avgFps: round2(avgFps),
-      minFps: round2(minFps),
-      maxFps: round2(maxFps),
-      onePercentLowFps: round2(onePercentLowFps),
-      avgFrameTimeMs: round2(avgFrameTimeMs),
+      weight: round3(weight),
+      avgFps: stats.avgFps,
+      medianFps: stats.medianFps,
+      minFps: stats.minFps,
+      maxFps: stats.maxFps,
+      onePercentLowFps: stats.onePercentLowFps,
+      avgFrameTimeMs: stats.avgFrameTimeMs,
+      medianFrameTimeMs: stats.medianFrameTimeMs,
+      p95FrameTimeMs: stats.p95FrameTimeMs,
+      p99FrameTimeMs: stats.p99FrameTimeMs,
+      madMs: stats.madMs,
+      cv: stats.cv,
+      stutterCount: stats.stutterCount,
+      throttled: stats.throttled,
+      vsyncPinned: stats.vsyncPinned,
+      vsyncTargetHz: stats.vsyncTargetHz,
+      confidence: stats.confidence,
+      warnings: stats.warnings,
+      gpuTimeMs: acc.gpuStats?.medianGpuTimeMs ?? null,
+      boundVerdict: acc.gpuStats?.boundVerdict ?? 'unavailable',
       avgDrawCalls,
       avgTriangles,
       stageScore,
-      sampleCount,
+      sampleCount: stats.sampleCount,
+      warmupDiscardedCount: stats.warmupDiscardedCount,
     };
   }
 
@@ -121,7 +185,7 @@ export class ScorecardCalculator {
       return {
         badge: 'ENTRY',
         label: 'Software / Fallback Rasterizer',
-        color: '#ef4444',
+        color: '#ff5d47',
         summary:
           'Software WebGL rasterizer detected (SwiftShader/llvmpipe). Hardware GPU acceleration is recommended for high-FPS shader stress workloads.',
       };
@@ -131,7 +195,7 @@ export class ScorecardCalculator {
       return {
         badge: 'TIER S',
         label: 'Enthusiast / Flagship GPU',
-        color: '#f59e0b',
+        color: '#f5b841',
         summary:
           'Exceptional rasterization and fragment throughput across 500k instanced meshes, deep raymarching, multi-pass water, and bloom.',
       };
@@ -141,7 +205,7 @@ export class ScorecardCalculator {
       return {
         badge: 'TIER A',
         label: 'Performance / High-End GPU',
-        color: '#22c55e',
+        color: '#34d399',
         summary:
           'Sustained 60+ FPS class rendering under intense volumetric shaders, dynamic reflections, and post-processing.',
       };
@@ -161,7 +225,7 @@ export class ScorecardCalculator {
       return {
         badge: 'TIER C',
         label: 'Baseline / Integrated GPU',
-        color: '#a855f7',
+        color: '#fb923c',
         summary:
           'Capable of real-time WebGL2 rendering; lowering resolution scale to 0.75x improves shader-bound headroom.',
       };
@@ -170,9 +234,9 @@ export class ScorecardCalculator {
     return {
       badge: 'ENTRY',
       label: 'Entry / Constrained GPU',
-      color: '#ef4444',
+      color: '#ff5d47',
       summary:
-        'Limited shader fill-rate or fallback rendering detected; use lower resolution scales in Sandbox mode for smoother exploration.',
+        'Limited shader fill-rate or fallback rendering detected; use lower resolution scales or Mobile preset for smoother exploration.',
     };
   }
 
@@ -181,56 +245,113 @@ export class ScorecardCalculator {
     durationSec: number,
     resolutionScale: number,
     gpu: WebGLGPUInfo,
+    options: BuildResultOptions = {
+      seed: 1,
+      presetId: 'desktop',
+      instanceScale: 1.0,
+    },
   ): BenchmarkResult {
-    const stages = accumulators.map((acc) =>
-      ScorecardCalculator.computeStageMetrics(acc, resolutionScale),
+    const normalizedWeights = ScorecardCalculator.normalizeWeights(
+      accumulators.map((a) => a.weight),
     );
 
-    let totalWeight = 0;
+    const stages = accumulators.map((acc, idx) =>
+      ScorecardCalculator.computeStageMetrics(
+        acc,
+        resolutionScale,
+        gpu.isFallback,
+        normalizedWeights[idx],
+      ),
+    );
+
     let weightedScoreSum = 0;
     const allFrameTimes: number[] = [];
     let totalFrameTimeMs = 0;
+    const allWarnings = new Set<string>();
+    const confidences: ConfidenceRating[] = [];
+
+    let gpuBoundCount = 0;
+    let cpuBoundCount = 0;
+    let availableBoundCount = 0;
 
     for (let i = 0; i < stages.length; i++) {
       const stage = stages[i]!;
       const acc = accumulators[i]!;
-      totalWeight += stage.weight;
       weightedScoreSum += stage.stageScore * stage.weight;
-      for (let j = 0; j < acc.frameTimesMs.length; j++) {
-        const ms = acc.frameTimesMs[j]!;
+      confidences.push(stage.confidence);
+      for (const w of stage.warnings) {
+        allWarnings.add(w);
+      }
+      if (stage.boundVerdict !== 'unavailable') {
+        availableBoundCount += 1;
+        if (stage.boundVerdict === 'gpu-bound') gpuBoundCount += 1;
+        else if (stage.boundVerdict === 'cpu-bound') cpuBoundCount += 1;
+      }
+
+      const samples = acc.collector.getSamples();
+      for (let j = 0; j < samples.length; j++) {
+        const ms = samples[j]!;
         allFrameTimes.push(ms);
         totalFrameTimeMs += ms;
       }
     }
 
-    const compositeScore = totalWeight > 0 ? Math.round(weightedScoreSum / totalWeight) : 0;
+    const compositeScore = Math.round(weightedScoreSum);
+    const overallSummary = analyzeFrameTimes(allFrameTimes, {
+      isFallbackGpu: gpu.isFallback,
+    });
     const overallAvgFps =
       allFrameTimes.length > 0 && totalFrameTimeMs > 0
         ? round2(1000 / (totalFrameTimeMs / allFrameTimes.length))
         : 0;
-    const overallOnePercentLowFps = round2(
-      ScorecardCalculator.computeOnePercentLowFps(allFrameTimes),
-    );
-    const tier = ScorecardCalculator.assignHardwareTier(compositeScore, gpu);
+    const overallMedianFps = overallSummary.medianFps;
+    const overallOnePercentLowFps = overallSummary.onePercentLowFps;
 
+    let confidence: ConfidenceRating = combineConfidence(confidences);
+    if (options.invalidated) {
+      confidence = 'low';
+      allWarnings.add('Run was invalidated due to WebGL context loss or interruption.');
+    }
+
+    let boundVerdict: BoundVerdict = 'unavailable';
+    if (availableBoundCount > 0) {
+      if (gpuBoundCount > cpuBoundCount) boundVerdict = 'gpu-bound';
+      else if (cpuBoundCount > gpuBoundCount) boundVerdict = 'cpu-bound';
+      else boundVerdict = 'balanced';
+    }
+
+    const tier = ScorecardCalculator.assignHardwareTier(compositeScore, gpu);
     const timestamp = new Date().toISOString();
     const id = `bench-${Date.now().toString(36)}`;
 
     return {
       id,
+      version: APP_VERSION,
       timestamp,
+      seed: options.seed,
+      presetId: options.presetId,
+      instanceScale: round2(options.instanceScale),
       durationSec: round2(durationSec),
       resolutionScale: round2(resolutionScale),
       gpu,
       compositeScore,
       tier,
+      confidence,
+      warnings: Array.from(allWarnings),
+      boundVerdict,
       stages,
       overallAvgFps,
+      overallMedianFps,
       overallOnePercentLowFps,
+      invalidated: options.invalidated,
     };
   }
 }
 
 function round2(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+function round3(value: number): number {
+  return Math.round(value * 1000) / 1000;
 }
