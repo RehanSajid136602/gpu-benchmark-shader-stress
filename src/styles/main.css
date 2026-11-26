@@ -1,30 +1,52 @@
 :root {
   color-scheme: dark;
 
-  --am-bg: #08090c;
-  --am-surface: rgba(14, 15, 20, 0.92);
-  --am-surface-solid: #0f1015;
-  --am-well: #17181f;
-  --am-well-hover: #1e2029;
-  --am-border: #252731;
-  --am-border-strong: #393c49;
+  /* Flight-Recorder Instrumentation Palette */
+  --carbon: #090b0f;
+  --carbon-elevated: rgba(14, 17, 23, 0.92);
+  --carbon-well: #12161e;
+  --ink: #eef2f7;
+  --ink-muted: #9aa4b2;
+  --ink-faint: #737d8c;
+  --rule: #202632;
+  --rule-strong: #343d4e;
 
-  --am-text: #f3f4f6;
-  --am-muted: #a1a5b0;
-  --am-faint: #848996;
+  --signal: #34d399;
+  --warn: #f5b841;
+  --fault: #ff5d47;
+  --cyan-instrument: #38bdf8;
 
-  --am-accent: #4cb3f0;
-  --am-accent-dim: rgba(76, 179, 240, 0.14);
-  --am-positive: #3fc07a;
-  --am-warning: #d9a441;
-  --am-negative: #e5566f;
+  --tier-s: #f5b841;
+  --tier-a: #34d399;
+  --tier-b: #38bdf8;
+  --tier-entry: #ff5d47;
 
-  --am-radius-card: 6px;
-  --am-radius-control: 5px;
-  --am-radius-pill: 4px;
+  /* Component aliases */
+  --am-bg: var(--carbon);
+  --am-surface: var(--carbon-elevated);
+  --am-surface-solid: #0e1218;
+  --am-well: var(--carbon-well);
+  --am-well-hover: #191f2a;
+  --am-border: var(--rule);
+  --am-border-strong: var(--rule-strong);
 
-  --am-font-sans: 'Inter', 'IBM Plex Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  --am-font-mono: 'JetBrains Mono', 'IBM Plex Mono', 'Fira Code', 'Cascadia Mono', ui-monospace, monospace; /* taste-skill-ignore */
+  --am-text: var(--ink);
+  --am-muted: var(--ink-muted);
+  --am-faint: var(--ink-faint);
+
+  --am-accent: var(--cyan-instrument);
+  --am-accent-dim: rgba(56, 189, 248, 0.14);
+  --am-positive: var(--signal);
+  --am-warning: var(--warn);
+  --am-negative: var(--fault);
+
+  --am-radius-card: 4px;
+  --am-radius-control: 4px;
+  --am-radius-pill: 3px;
+
+  --am-font-display: 'Bricolage Grotesque', sans-serif;
+  --am-font-sans: 'Bricolage Grotesque', sans-serif;
+  --am-font-mono: 'JetBrains Mono', monospace;
 }
 
 *,
@@ -1216,5 +1238,337 @@ input:focus-visible {
 
   .am-score-summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* ===== Flight-Recorder Atmosphere, A11y & Phase 2 Extensions ===== */
+.am-overlay::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.012) 0px,
+    rgba(255, 255, 255, 0.012) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  opacity: 0.45;
+  z-index: -1;
+}
+
+.am-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+.am-kpi-quad {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.am-warning-banner {
+  position: fixed;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 640px;
+  padding: 8px 14px;
+  background: rgba(24, 18, 8, 0.94);
+  border: 1px solid var(--warn);
+  border-radius: var(--am-radius-control);
+  color: var(--warn);
+  font-family: var(--am-font-mono);
+  font-size: 11px;
+  line-height: 1.4;
+  pointer-events: auto;
+  z-index: 40;
+}
+
+.am-stage-wipe {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 18px;
+  background: rgba(9, 11, 15, 0.9);
+  border: 1px solid var(--rule-strong);
+  border-left: 3px solid var(--signal);
+  border-radius: var(--am-radius-card);
+  pointer-events: none;
+  z-index: 35;
+}
+
+.am-wipe-tag {
+  font-family: var(--am-font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--signal);
+}
+
+.am-wipe-name {
+  font-family: var(--am-font-display);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+@keyframes am-wipe-in-out {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -44%) scale(0.97);
+  }
+  18% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  82% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -56%) scale(0.98);
+  }
+}
+
+.am-wipe-active {
+  animation: am-wipe-in-out 1.15s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+/* Asymmetric Scorecard Hero */
+.am-score-hero-asym {
+  display: grid;
+  grid-template-columns: 1.15fr 1fr;
+  gap: 18px;
+  align-items: stretch;
+  margin-bottom: 16px;
+}
+
+.am-score-dominant-col {
+  padding: 18px 20px;
+  background: var(--carbon-well);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--signal);
+  border-radius: var(--am-radius-card);
+}
+
+.am-score-label {
+  font-family: var(--am-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--ink-muted);
+}
+
+.am-score-value {
+  font-family: var(--am-font-mono);
+  font-size: 52px;
+  font-weight: 700;
+  line-height: 1.05;
+  color: #ffffff;
+  margin: 6px 0 12px;
+}
+
+.am-score-badges-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.am-conf-badge,
+.am-bound-chip,
+.am-tier-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  font-family: var(--am-font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--am-radius-pill);
+}
+
+.am-bound-chip {
+  color: var(--cyan-instrument);
+  border-color: rgba(56, 189, 248, 0.4);
+  background: rgba(56, 189, 248, 0.1);
+}
+
+@keyframes am-tier-pop {
+  0% {
+    opacity: 0;
+    transform: translateY(4px) scale(0.95);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.am-tier-reveal {
+  animation: am-tier-pop 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.am-tier-title {
+  font-family: var(--am-font-display);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 4px;
+}
+
+.am-tier-summary {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-muted);
+  line-height: 1.45;
+}
+
+.am-score-env-card {
+  padding: 14px 16px;
+  background: #0c0f15;
+  border: 1px solid var(--rule);
+  border-radius: var(--am-radius-card);
+}
+
+.am-env-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.am-env-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  padding-bottom: 5px;
+}
+
+.am-env-label {
+  font-family: var(--am-font-mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+  flex-shrink: 0;
+}
+
+.am-env-value {
+  font-family: var(--am-font-mono);
+  font-size: 11px;
+  color: var(--ink);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.am-warnings-box {
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  background: rgba(245, 184, 65, 0.08);
+  border: 1px solid rgba(245, 184, 65, 0.4);
+  border-radius: var(--am-radius-card);
+}
+
+.am-warnings-title {
+  font-family: var(--am-font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--warn);
+  margin-bottom: 4px;
+}
+
+.am-warnings-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--ink);
+  line-height: 1.45;
+}
+
+.am-timeline-strip-wrap {
+  margin-bottom: 16px;
+}
+
+.am-timeline-strip {
+  display: flex;
+  gap: 8px;
+}
+
+.am-timeline-seg {
+  min-width: 0;
+  padding: 8px 10px;
+  background: var(--carbon-well);
+  border: 1px solid var(--rule);
+  border-radius: var(--am-radius-control);
+}
+
+.am-timeline-seg-head {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--am-font-mono);
+  font-size: 10px;
+  color: var(--ink-muted);
+  margin-bottom: 6px;
+}
+
+.am-timeline-bar {
+  height: 4px;
+  background: #171c26;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.am-timeline-fill {
+  height: 100%;
+  border-radius: 2px;
+}
+
+.am-mini-conf {
+  font-family: var(--am-font-mono);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+@media (max-width: 780px) {
+  .am-score-hero-asym {
+    grid-template-columns: 1fr;
+  }
+  .am-timeline-strip {
+    flex-direction: column;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .am-overlay::before {
+    display: none;
   }
 }

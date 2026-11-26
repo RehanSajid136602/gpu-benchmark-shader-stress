@@ -1,28 +1,36 @@
 import type { BenchmarkResult } from '../types.ts';
 import { ScorecardExporter } from './ScorecardExporter.ts';
 import {
+  formatBoundVerdict,
   formatCompactCount,
   formatFps,
+  formatGpuTimeMs,
   formatMs,
   formatNumber,
+  formatSeedHex,
   formatTimestamp,
+  getConfidenceColor,
 } from './format.ts';
 
 /**
- * Modal overlay presenting the completed BenchmarkResult scorecard:
- * weighted composite GPU score, hardware tier badge, GPU specs,
- * per-stage performance breakdown table, and JSON / PNG exports.
+ * Flight-recorder Scorecard Modal:
+ * Asymmetric layout with dominant score column, animated score count-up,
+ * ARIA live region, confidence badge, warnings list, GPU/CPU-bound chip,
+ * per-stage timeline strip, and JSON / CSV / PNG exports.
  */
 export class ScorecardModal {
   private readonly backdrop: HTMLElement;
   private readonly dialog: HTMLElement;
   private readonly bodyEl: HTMLElement;
+  private readonly liveRegionEl: HTMLElement;
   private readonly closeBtn: HTMLButtonElement;
   private readonly exportJsonBtn: HTMLButtonElement;
+  private readonly exportCsvBtn: HTMLButtonElement;
   private readonly exportPngBtn: HTMLButtonElement;
   private readonly runAgainBtn: HTMLButtonElement;
 
   private currentResult: BenchmarkResult | null = null;
+  private countUpRafId: number | null = null;
   private readonly onRunAgain: () => void;
   private readonly onCloseCallback: () => void;
 
@@ -52,6 +60,12 @@ export class ScorecardModal {
     this.dialog.setAttribute('aria-labelledby', 'am-scorecard-heading');
     this.dialog.setAttribute('data-testid', 'scorecard-modal');
 
+    // ARIA live region for accessible score reveal
+    this.liveRegionEl = document.createElement('div');
+    this.liveRegionEl.className = 'am-sr-only';
+    this.liveRegionEl.setAttribute('aria-live', 'polite');
+    this.liveRegionEl.setAttribute('aria-atomic', 'true');
+
     const header = document.createElement('header');
     header.className = 'am-modal-header';
 
@@ -60,7 +74,7 @@ export class ScorecardModal {
     const heading = document.createElement('h2');
     heading.id = 'am-scorecard-heading';
     heading.className = 'am-modal-title';
-    heading.textContent = 'Benchmark Scorecard';
+    heading.textContent = 'Flight-Recorder Scorecard';
     titleWrap.appendChild(heading);
 
     this.closeBtn = document.createElement('button');
@@ -93,22 +107,33 @@ export class ScorecardModal {
       }
     });
 
+    this.exportCsvBtn = document.createElement('button');
+    this.exportCsvBtn.type = 'button';
+    this.exportCsvBtn.className = 'am-btn am-btn-secondary';
+    this.exportCsvBtn.setAttribute('data-testid', 'export-csv-btn');
+    this.exportCsvBtn.textContent = 'Export CSV';
+    this.exportCsvBtn.addEventListener('click', () => {
+      if (this.currentResult) {
+        ScorecardExporter.exportCSV(this.currentResult);
+      }
+    });
+
     this.exportPngBtn = document.createElement('button');
     this.exportPngBtn.type = 'button';
     this.exportPngBtn.className = 'am-btn am-btn-secondary';
     this.exportPngBtn.setAttribute('data-testid', 'export-png-btn');
-    this.exportPngBtn.textContent = 'Download Scorecard Image';
+    this.exportPngBtn.textContent = 'Shareable PNG';
     this.exportPngBtn.addEventListener('click', () => {
       if (!this.currentResult) return;
       this.exportPngBtn.disabled = true;
       this.exportPngBtn.textContent = 'Rendering PNG…';
       void ScorecardExporter.exportPNG(this.currentResult).finally(() => {
         this.exportPngBtn.disabled = false;
-        this.exportPngBtn.textContent = 'Download Scorecard Image';
+        this.exportPngBtn.textContent = 'Shareable PNG';
       });
     });
 
-    exportGroup.append(this.exportJsonBtn, this.exportPngBtn);
+    exportGroup.append(this.exportJsonBtn, this.exportCsvBtn, this.exportPngBtn);
 
     const actionGroup = document.createElement('div');
     actionGroup.className = 'am-modal-action-group';
@@ -131,7 +156,7 @@ export class ScorecardModal {
     actionGroup.append(inspectBtn, this.runAgainBtn);
     footer.append(exportGroup, actionGroup);
 
-    this.dialog.append(header, this.bodyEl, footer);
+    this.dialog.append(this.liveRegionEl, header, this.bodyEl, footer);
     this.backdrop.appendChild(this.dialog);
     parent.appendChild(this.backdrop);
   }
@@ -144,108 +169,158 @@ export class ScorecardModal {
     this.currentResult = result;
     this.renderResult(result);
     this.backdrop.hidden = false;
+    this.liveRegionEl.textContent = `Benchmark complete. Composite score ${result.compositeScore}, ${result.tier.badge}, confidence ${result.confidence}.`;
     this.closeBtn.focus();
   }
 
   public close(): void {
     if (this.backdrop.hidden) return;
+    if (this.countUpRafId !== null) {
+      cancelAnimationFrame(this.countUpRafId);
+      this.countUpRafId = null;
+    }
     this.backdrop.hidden = true;
     this.onCloseCallback();
   }
 
   public dispose(): void {
+    if (this.countUpRafId !== null) {
+      cancelAnimationFrame(this.countUpRafId);
+      this.countUpRafId = null;
+    }
     this.backdrop.remove();
   }
 
   private renderResult(result: BenchmarkResult): void {
-    this.bodyEl.replaceChildren();
+    this.bodyEl.innerHTML = '';
 
-    const maxScore = Math.max(1, ...result.stages.map((s) => s.stageScore));
-    const tierColor = result.tier.color || '#4cb3f0';
-
-    // Top Hero Row: Composite Score + Tier + Run Summary
+    // Asymmetric Hero Grid: Dominant Score Column (left) + Telemetry & Env Column (right)
     const hero = document.createElement('div');
-    hero.className = 'am-score-hero';
+    hero.className = 'am-score-hero-asym';
 
-    const scoreBlock = document.createElement('div');
-    scoreBlock.className = 'am-score-lead-card';
+    const scoreCol = document.createElement('div');
+    scoreCol.className = 'am-score-dominant-col';
 
-    const scoreLabel = document.createElement('span');
-    scoreLabel.className = 'am-meta-label';
-    scoreLabel.textContent = 'Composite GPU Score';
+    const scoreLabel = document.createElement('div');
+    scoreLabel.className = 'am-score-label';
+    scoreLabel.textContent = 'COMPOSITE GPU SCORE';
 
-    const scoreNum = document.createElement('div');
-    scoreNum.className = 'am-score-value num';
-    scoreNum.setAttribute('data-testid', 'scorecard-composite-score');
-    scoreNum.textContent = formatNumber(result.compositeScore);
+    const scoreValue = document.createElement('div');
+    scoreValue.className = 'am-score-value num';
+    scoreValue.setAttribute('data-testid', 'scorecard-composite');
+    scoreValue.textContent = '0';
 
-    const tierRow = document.createElement('div');
-    tierRow.className = 'am-tier-row';
+    const badgesRow = document.createElement('div');
+    badgesRow.className = 'am-score-badges-row';
 
     const tierBadge = document.createElement('span');
-    tierBadge.className = 'am-tier-badge';
+    tierBadge.className = 'am-tier-badge am-tier-reveal';
     tierBadge.setAttribute('data-testid', 'scorecard-tier-badge');
     tierBadge.textContent = result.tier.badge;
-    tierBadge.style.color = tierColor;
-    tierBadge.style.borderColor = tierColor;
+    tierBadge.style.color = result.tier.color;
+    tierBadge.style.borderColor = result.tier.color;
+    tierBadge.style.backgroundColor = `${result.tier.color}1f`;
 
-    const tierLabel = document.createElement('span');
-    tierLabel.className = 'am-tier-label';
-    tierLabel.textContent = result.tier.label;
+    const confBadge = document.createElement('span');
+    confBadge.className = 'am-conf-badge';
+    confBadge.setAttribute('data-testid', 'scorecard-confidence');
+    const confColor = getConfidenceColor(result.confidence);
+    confBadge.textContent = `CONFIDENCE: ${result.confidence.toUpperCase()}`;
+    confBadge.style.color = confColor;
+    confBadge.style.borderColor = `${confColor}66`;
+    confBadge.style.backgroundColor = `${confColor}18`;
 
-    tierRow.append(tierBadge, tierLabel);
+    const boundChip = document.createElement('span');
+    boundChip.className = 'am-bound-chip';
+    boundChip.textContent = formatBoundVerdict(result.boundVerdict);
+
+    badgesRow.append(tierBadge, confBadge, boundChip);
+
+    const tierTitle = document.createElement('div');
+    tierTitle.className = 'am-tier-title';
+    tierTitle.textContent = result.tier.label;
 
     const tierSummary = document.createElement('p');
     tierSummary.className = 'am-tier-summary';
     tierSummary.textContent = result.tier.summary;
 
-    scoreBlock.append(scoreLabel, scoreNum, tierRow, tierSummary);
+    scoreCol.append(scoreLabel, scoreValue, badgesRow, tierTitle, tierSummary);
 
-    // Hardware & Run Overview card
-    const envBlock = document.createElement('div');
-    envBlock.className = 'am-score-env-card';
+    // Right Environment & Summary Column
+    const envCol = document.createElement('div');
+    envCol.className = 'am-score-env-card';
 
-    const envHeader = document.createElement('div');
-    envHeader.className = 'am-env-header';
-    const envLabel = document.createElement('span');
-    envLabel.className = 'am-meta-label';
-    envLabel.textContent = 'Device & Run Profile';
-    const envStamp = document.createElement('span');
-    envStamp.className = 'am-env-stamp num';
-    envStamp.textContent = `${result.id} · ${formatTimestamp(result.timestamp)}`;
-    envHeader.append(envLabel, envStamp);
-
-    const gpuStr = document.createElement('div');
-    gpuStr.className = 'am-env-gpu';
-    gpuStr.setAttribute('data-testid', 'scorecard-gpu-renderer');
-    gpuStr.textContent = result.gpu.renderer;
-
-    const gpuSub = document.createElement('div');
-    gpuSub.className = 'am-env-gpu-sub';
-    gpuSub.textContent = `${result.gpu.vendor} · ${result.gpu.webglVersion} · MaxTex ${result.gpu.maxTextureSize}px`;
-
-    const summaryGrid = document.createElement('div');
-    summaryGrid.className = 'am-score-summary-grid';
-    summaryGrid.append(
-      this.createStatCell('Overall Avg', `${formatFps(result.overallAvgFps)} fps`),
-      this.createStatCell('Overall 1% Low', `${formatFps(result.overallOnePercentLowFps)} fps`),
-      this.createStatCell('Resolution Scale', `${result.resolutionScale.toFixed(2)}×`),
-      this.createStatCell('Duration', `${result.durationSec.toFixed(1)} s`),
+    const envMeta = document.createElement('div');
+    envMeta.className = 'am-env-grid';
+    envMeta.append(
+      this.createEnvRow('GPU Renderer', result.gpu.renderer),
+      this.createEnvRow('Vendor & API', `${result.gpu.vendor} · ${result.gpu.webglVersion}`),
+      this.createEnvRow('Median FPS', `${formatFps(result.overallMedianFps)} fps`),
+      this.createEnvRow('1% Low FPS', `${formatFps(result.overallOnePercentLowFps)} fps`),
+      this.createEnvRow(
+        'Profile / Scale',
+        `${result.presetId.toUpperCase()} · ${result.resolutionScale.toFixed(2)}× res · ${Math.round(result.instanceScale * 100)}% inst`,
+      ),
+      this.createEnvRow('Seed / Version', `${formatSeedHex(result.seed)} · v${result.version}`),
+      this.createEnvRow('Timestamp', formatTimestamp(result.timestamp)),
     );
+    envCol.appendChild(envMeta);
 
-    envBlock.append(envHeader, gpuStr, gpuSub, summaryGrid);
-    hero.append(scoreBlock, envBlock);
+    hero.append(scoreCol, envCol);
+    this.bodyEl.appendChild(hero);
 
-    // Per-Stage Breakdown Table
-    const tableSection = document.createElement('div');
-    tableSection.className = 'am-stage-table-wrap';
+    // Warnings Panel (if any)
+    if (result.warnings.length > 0) {
+      const warnBox = document.createElement('div');
+      warnBox.className = 'am-warnings-box';
+      warnBox.setAttribute('data-testid', 'scorecard-warnings');
+      const warnHead = document.createElement('div');
+      warnHead.className = 'am-warnings-title';
+      warnHead.textContent = `INSTRUMENTATION WARNINGS (${result.warnings.length})`;
+      const warnList = document.createElement('ul');
+      warnList.className = 'am-warnings-list';
+      for (const w of result.warnings) {
+        const li = document.createElement('li');
+        li.textContent = w;
+        warnList.appendChild(li);
+      }
+      warnBox.append(warnHead, warnList);
+      this.bodyEl.appendChild(warnBox);
+    }
+
+    // Per-stage Timeline Strip
+    const timelineWrap = document.createElement('div');
+    timelineWrap.className = 'am-timeline-strip-wrap';
+    const timelineTitle = document.createElement('div');
+    timelineTitle.className = 'am-section-title';
+    timelineTitle.textContent = 'STAGE WEIGHT & SCORE TIMELINE';
+    const timelineStrip = document.createElement('div');
+    timelineStrip.className = 'am-timeline-strip';
+    const maxStageScore = Math.max(1, ...result.stages.map((s) => s.stageScore));
+    for (const s of result.stages) {
+      const seg = document.createElement('div');
+      seg.className = 'am-timeline-seg';
+      seg.style.flexGrow = String(Math.max(0.1, s.weight));
+      const pct = Math.round((s.stageScore / maxStageScore) * 100);
+      seg.innerHTML = `
+        <div class="am-timeline-seg-head">
+          <span>${s.id.toUpperCase()}</span>
+          <span class="num">${formatNumber(s.stageScore)}</span>
+        </div>
+        <div class="am-timeline-bar"><div class="am-timeline-fill" style="width:${pct}%;background:${result.tier.color}"></div></div>
+      `;
+      timelineStrip.appendChild(seg);
+    }
+    timelineWrap.append(timelineTitle, timelineStrip);
+    this.bodyEl.appendChild(timelineWrap);
+
+    // Per-stage breakdown table
+    const tableWrap = document.createElement('div');
+    tableWrap.className = 'am-stage-table-wrap';
 
     const tableTitle = document.createElement('h3');
-    tableTitle.className = 'am-table-heading';
-    tableTitle.textContent = 'Per-stage breakdown';
-
-    const tableScroll = document.createElement('div');
-    tableScroll.className = 'am-table-scroll';
+    tableTitle.className = 'am-section-title';
+    tableTitle.textContent = 'PER-STAGE TELEMETRY BREAKDOWN';
 
     const table = document.createElement('table');
     table.className = 'am-stage-table';
@@ -254,74 +329,91 @@ export class ScorecardModal {
     const thead = document.createElement('thead');
     thead.innerHTML = `
       <tr>
-        <th scope="col">Stage</th>
-        <th scope="col" class="num">Avg FPS</th>
-        <th scope="col" class="num">1% Low</th>
-        <th scope="col" class="num">Avg Frame</th>
-        <th scope="col" class="num">Draw Calls</th>
-        <th scope="col" class="num">Triangles</th>
-        <th scope="col" class="num">Stage Score</th>
+        <th>Stage</th>
+        <th class="num">Wt</th>
+        <th class="num">Med FPS</th>
+        <th class="num">1% Low</th>
+        <th class="num">P95 ms</th>
+        <th class="num">CV / Stut</th>
+        <th class="num">GPU Time</th>
+        <th>Conf</th>
+        <th class="num">Score</th>
       </tr>
     `;
 
     const tbody = document.createElement('tbody');
-    for (const stage of result.stages) {
+    for (let i = 0; i < result.stages.length; i++) {
+      const s = result.stages[i]!;
       const tr = document.createElement('tr');
-      const pct = Math.max(3, Math.min(100, Math.round((stage.stageScore / maxScore) * 100)));
-
-      const nameTd = document.createElement('td');
-      nameTd.className = 'am-stage-cell';
-      const stageName = document.createElement('div');
-      stageName.className = 'am-table-stage-name';
-      stageName.textContent = stage.name;
-      const stageMeta = document.createElement('div');
-      stageMeta.className = 'am-table-stage-meta';
-      stageMeta.textContent = `Weight ${stage.weight.toFixed(2)}× · ${stage.sampleCount} samples`;
-      const bar = document.createElement('div');
-      bar.className = 'am-table-bar-track';
-      const fill = document.createElement('div');
-      fill.className = 'am-table-bar-fill';
-      fill.style.width = `${pct}%`;
-      bar.appendChild(fill);
-      nameTd.append(stageName, stageMeta, bar);
-
-      tr.append(
-        nameTd,
-        this.createNumericTd(formatFps(stage.avgFps)),
-        this.createNumericTd(formatFps(stage.onePercentLowFps)),
-        this.createNumericTd(`${formatMs(stage.avgFrameTimeMs)} ms`),
-        this.createNumericTd(formatNumber(stage.avgDrawCalls)),
-        this.createNumericTd(formatCompactCount(stage.avgTriangles), `${formatNumber(stage.avgTriangles)} triangles`),
-        this.createNumericTd(formatNumber(stage.stageScore), undefined, 'am-score-cell'),
-      );
+      tr.className = 'am-stagger-row';
+      tr.style.animationDelay = `${i * 55}ms`;
+      const sConfColor = getConfidenceColor(s.confidence);
+      tr.innerHTML = `
+        <td>
+          <div class="am-td-stage-name">${s.name}</div>
+          <div class="am-td-stage-meta">${formatBoundVerdict(s.boundVerdict)} · ${formatCompactCount(s.avgTriangles)} tris</div>
+        </td>
+        <td class="num">${(s.weight * 100).toFixed(0)}%</td>
+        <td class="num">${formatFps(s.medianFps)}</td>
+        <td class="num">${formatFps(s.onePercentLowFps)}</td>
+        <td class="num">${formatMs(s.p95FrameTimeMs)}</td>
+        <td class="num">${(s.cv * 100).toFixed(1)}% · ${s.stutterCount}</td>
+        <td class="num">${formatGpuTimeMs(s.gpuTimeMs)}</td>
+        <td><span class="am-mini-conf" style="color:${sConfColor}">${s.confidence.toUpperCase()}</span></td>
+        <td class="num am-td-score">${formatNumber(s.stageScore)}</td>
+      `;
       tbody.appendChild(tr);
     }
 
     table.append(thead, tbody);
-    tableScroll.appendChild(table);
-    tableSection.append(tableTitle, tableScroll);
+    tableWrap.append(tableTitle, table);
+    this.bodyEl.appendChild(tableWrap);
 
-    this.bodyEl.append(hero, tableSection);
+    this.animateScoreCountUp(scoreValue, result.compositeScore);
   }
 
-  private createStatCell(label: string, value: string): HTMLElement {
-    const cell = document.createElement('div');
-    cell.className = 'am-score-stat-cell';
-    const lbl = document.createElement('span');
-    lbl.className = 'am-kpi-label';
-    lbl.textContent = label;
-    const val = document.createElement('span');
-    val.className = 'am-score-stat-val num';
-    val.textContent = value;
-    cell.append(lbl, val);
-    return cell;
+  private animateScoreCountUp(el: HTMLElement, target: number): void {
+    if (this.countUpRafId !== null) {
+      cancelAnimationFrame(this.countUpRafId);
+      this.countUpRafId = null;
+    }
+
+    const reducedMotion =
+      typeof window !== 'undefined' &&
+      window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+
+    if (reducedMotion || target <= 0) {
+      el.textContent = formatNumber(target);
+      return;
+    }
+
+    const durationMs = 680;
+    const startMs = performance.now();
+    const step = (now: number): void => {
+      const t = Math.min(1, (now - startMs) / durationMs);
+      const eased = 1 - Math.pow(1 - t, 3);
+      el.textContent = formatNumber(Math.round(target * eased));
+      if (t < 1) {
+        this.countUpRafId = requestAnimationFrame(step);
+      } else {
+        el.textContent = formatNumber(target);
+        this.countUpRafId = null;
+      }
+    };
+    this.countUpRafId = requestAnimationFrame(step);
   }
 
-  private createNumericTd(text: string, title?: string, extraClass?: string): HTMLTableCellElement {
-    const td = document.createElement('td');
-    td.className = extraClass ? `num ${extraClass}` : 'num';
-    td.textContent = text;
-    if (title) td.title = title;
-    return td;
+  private createEnvRow(label: string, value: string): HTMLElement {
+    const row = document.createElement('div');
+    row.className = 'am-env-row';
+    const l = document.createElement('span');
+    l.className = 'am-env-label';
+    l.textContent = label;
+    const v = document.createElement('span');
+    v.className = 'am-env-value num';
+    v.textContent = value;
+    v.title = value;
+    row.append(l, v);
+    return row;
   }
 }

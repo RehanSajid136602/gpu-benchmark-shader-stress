@@ -4,7 +4,10 @@ import type {
   BenchmarkProgress,
   BenchmarkResult,
   EngineController,
+  PresetId,
   SandboxPasses,
+  StabilityReport,
+  StageId,
   TelemetrySnapshot,
   UICallbacks,
   WebGLGPUInfo,
@@ -14,15 +17,10 @@ import { ScorecardModal } from './ScorecardModal.ts';
 import { TelemetryHUD } from './TelemetryHUD.ts';
 import { formatFps, formatMs, getFpsSeverityColor } from './format.ts';
 
-export interface BenchmarkUIOptions {
-  root: HTMLElement;
-  controller: EngineController;
-}
-
 /**
  * Root UI orchestrator mounted inside `#app` over the full-viewport WebGL2 canvas.
  * Coordinates Live Telemetry HUD, Benchmark/Sandbox ControlPanel, Minimal HUD mode (`H`),
- * error banner reporting, and the Results Scorecard modal & export tools.
+ * stage transition wipes, software-rasterizer & context-loss banners, and Scorecard modal.
  */
 export class BenchmarkUI {
   private readonly root: HTMLElement;
@@ -37,6 +35,8 @@ export class BenchmarkUI {
   private readonly minimalStageEl: HTMLElement;
   private readonly restoreHudBtn: HTMLButtonElement;
   private readonly errorBannerEl: HTMLElement;
+  private readonly fallbackBannerEl: HTMLElement;
+  private readonly stageWipeEl: HTMLElement;
 
   private readonly telemetryHUD: TelemetryHUD;
   private readonly controlPanel: ControlPanel;
@@ -46,25 +46,18 @@ export class BenchmarkUI {
   private minimalHud = false;
   private lastMinimalText = '';
   private lastMinimalColor = '';
+  private wipeTimer: number | null = null;
   private disposed = false;
 
-  constructor(rootOrOptions: HTMLElement | BenchmarkUIOptions, controller?: EngineController) {
-    if (rootOrOptions instanceof HTMLElement) {
-      if (!controller) {
-        throw new Error('BenchmarkUI requires an EngineController instance.');
-      }
-      this.root = rootOrOptions;
-      this.controller = controller;
-    } else {
-      this.root = rootOrOptions.root;
-      this.controller = rootOrOptions.controller;
-    }
+  constructor(root: HTMLElement, controller: EngineController) {
+    this.root = root;
+    this.controller = controller;
 
     this.overlayEl = document.createElement('div');
     this.overlayEl.className = 'am-overlay';
     this.overlayEl.setAttribute('data-ui', '');
 
-    // Top-right HUD utility strip (Scorecard reopen + Hide HUD)
+    // Top-right HUD utility strip
     this.topActionsEl = document.createElement('div');
     this.topActionsEl.className = 'am-top-actions';
 
@@ -90,7 +83,7 @@ export class BenchmarkUI {
 
     this.topActionsEl.append(this.topScorecardBtn, this.hudToggleBtn);
 
-    // Unobtrusive Minimal HUD corner pill (visible only when minimalHud === true)
+    // Unobtrusive Minimal HUD corner pill
     this.minimalPillEl = document.createElement('div');
     this.minimalPillEl.className = 'am-minimal-pill';
     this.minimalPillEl.setAttribute('data-testid', 'minimal-hud-pill');
@@ -123,16 +116,29 @@ export class BenchmarkUI {
       this.restoreHudBtn,
     );
 
-    // Error banner (hidden unless WebGL / engine error occurs)
+    // Software rasterizer warning banner
+    this.fallbackBannerEl = document.createElement('div');
+    this.fallbackBannerEl.className = 'am-warning-banner';
+    this.fallbackBannerEl.setAttribute('role', 'status');
+    this.fallbackBannerEl.setAttribute('data-testid', 'software-rasterizer-banner');
+    this.fallbackBannerEl.hidden = true;
+
+    // Error / context-loss banner
     this.errorBannerEl = document.createElement('div');
     this.errorBannerEl.className = 'am-error-banner';
     this.errorBannerEl.setAttribute('role', 'alert');
     this.errorBannerEl.hidden = true;
 
+    // Stage transition wipe overlay
+    this.stageWipeEl = document.createElement('div');
+    this.stageWipeEl.className = 'am-stage-wipe';
+    this.stageWipeEl.setAttribute('aria-hidden', 'true');
+    this.stageWipeEl.hidden = true;
+
     // Telemetry dock (top-left)
     this.telemetryHUD = new TelemetryHUD(this.overlayEl);
 
-    // Controls dock (top-right, below topActions)
+    // Controls dock (top-right)
     const rightColumn = document.createElement('div');
     rightColumn.className = 'am-right-column';
     rightColumn.appendChild(this.topActionsEl);
@@ -141,9 +147,14 @@ export class BenchmarkUI {
       this.openLastScorecard();
     });
 
-    this.overlayEl.append(rightColumn, this.minimalPillEl, this.errorBannerEl);
+    this.overlayEl.append(
+      rightColumn,
+      this.minimalPillEl,
+      this.fallbackBannerEl,
+      this.errorBannerEl,
+      this.stageWipeEl,
+    );
 
-    // Scorecard modal
     this.scorecardModal = new ScorecardModal(this.overlayEl, {
       onRunAgain: () => {
         this.controller.startBenchmark();
@@ -155,12 +166,17 @@ export class BenchmarkUI {
     this.callbacks = {
       onTelemetry: (snapshot) => this.handleTelemetry(snapshot),
       onProgress: (progress) => this.handleProgress(progress),
+      onStageTransition: (idx, id, name) => this.handleStageTransition(idx, id, name),
       onBenchmarkComplete: (result) => this.handleBenchmarkComplete(result),
       onBenchmarkStopped: () => this.handleBenchmarkStopped(),
+      onStabilityComplete: (report) => this.handleStabilityComplete(report),
       onModeChange: (mode) => this.handleModeChange(mode),
       onSandboxPassesChange: (passes) => this.handleSandboxPassesChange(passes),
       onResolutionScaleChange: (scale) => this.handleResolutionScaleChange(scale),
+      onPresetChange: (presetId) => this.handlePresetChange(presetId),
       onGPUInfo: (info) => this.handleGPUInfo(info),
+      onContextLost: (msg) => this.handleContextLost(msg),
+      onContextRestored: () => this.handleContextRestored(),
       onError: (msg) => this.handleError(msg),
     };
 
@@ -204,6 +220,10 @@ export class BenchmarkUI {
   public dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    if (this.wipeTimer !== null) {
+      window.clearTimeout(this.wipeTimer);
+      this.wipeTimer = null;
+    }
     window.removeEventListener('keydown', this.handleKeyDown);
     this.telemetryHUD.dispose();
     this.controlPanel.dispose();
@@ -212,7 +232,8 @@ export class BenchmarkUI {
   }
 
   private syncInitialState(): void {
-    this.telemetryHUD.setGPUInfo(this.controller.getGPUInfo());
+    const gpu = this.controller.getGPUInfo();
+    this.handleGPUInfo(gpu);
     this.controlPanel.setMode(this.controller.getMode());
     this.controlPanel.setSandboxPasses(this.controller.getSandboxPasses());
     this.controlPanel.setResolutionScale(this.controller.getResolutionScale());
@@ -229,6 +250,13 @@ export class BenchmarkUI {
 
   private handleGPUInfo(info: WebGLGPUInfo): void {
     this.telemetryHUD.setGPUInfo(info);
+    if (info.isFallback) {
+      this.fallbackBannerEl.textContent =
+        'Software rasterizer detected (SwiftShader / llvmpipe). Workload auto-capped; scores reflect CPU emulation, not hardware GPU.';
+      this.fallbackBannerEl.hidden = false;
+    } else {
+      this.fallbackBannerEl.hidden = true;
+    }
   }
 
   private handleTelemetry(snapshot: TelemetrySnapshot): void {
@@ -262,10 +290,35 @@ export class BenchmarkUI {
     if (progress.running) {
       const left = Math.max(0, progress.totalDurationSec - progress.totalElapsedSec);
       this.minimalStageEl.hidden = false;
-      this.minimalStageEl.textContent = `S${progress.stageIndex + 1}/4 · ${left.toFixed(0)}s`;
+      this.minimalStageEl.textContent = progress.stabilityMode
+        ? `LOOP ${progress.stabilityLoopIndex ?? 1} · S${progress.stageIndex + 1}/4`
+        : `S${progress.stageIndex + 1}/4 · ${left.toFixed(0)}s`;
     } else {
       this.minimalStageEl.hidden = true;
     }
+  }
+
+  private handleStageTransition(index: number, _id: StageId, name: string): void {
+    if (this.disposed || !this.controller.getProgress().running) return;
+    const reduced =
+      typeof window !== 'undefined' &&
+      window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    if (reduced) return;
+
+    if (this.wipeTimer !== null) {
+      window.clearTimeout(this.wipeTimer);
+    }
+    this.stageWipeEl.innerHTML = `<span class="am-wipe-tag">STAGE 0${index + 1}</span><span class="am-wipe-name">${name}</span>`;
+    this.stageWipeEl.hidden = false;
+    this.stageWipeEl.classList.remove('am-wipe-active');
+    void this.stageWipeEl.offsetWidth;
+    this.stageWipeEl.classList.add('am-wipe-active');
+
+    this.wipeTimer = window.setTimeout(() => {
+      this.stageWipeEl.hidden = true;
+      this.stageWipeEl.classList.remove('am-wipe-active');
+      this.wipeTimer = null;
+    }, 1150);
   }
 
   private handleBenchmarkComplete(result: BenchmarkResult): void {
@@ -277,6 +330,11 @@ export class BenchmarkUI {
   private handleBenchmarkStopped(): void {
     if (this.disposed) return;
     this.controlPanel.updateProgress(this.controller.getProgress());
+  }
+
+  private handleStabilityComplete(report: StabilityReport): void {
+    if (this.disposed) return;
+    this.handleError(`Stability Test Complete: ${report.verdict}`);
   }
 
   private handleModeChange(mode: BenchmarkMode): void {
@@ -292,6 +350,35 @@ export class BenchmarkUI {
   private handleResolutionScaleChange(scale: number): void {
     if (this.disposed) return;
     this.controlPanel.setResolutionScale(scale);
+  }
+
+  private handlePresetChange(_presetId: PresetId): void {
+    // Wired in Phase 3 ControlPanel preset selector
+  }
+
+  private handleContextLost(message: string): void {
+    this.errorBannerEl.innerHTML = '';
+    const text = document.createElement('span');
+    text.textContent = message;
+    this.errorBannerEl.appendChild(text);
+    this.errorBannerEl.hidden = false;
+  }
+
+  private handleContextRestored(): void {
+    this.errorBannerEl.innerHTML = '';
+    const text = document.createElement('span');
+    text.textContent = 'WebGL2 context restored. Previous run invalidated — ready to retry.';
+    const retryBtn = document.createElement('button');
+    retryBtn.type = 'button';
+    retryBtn.className = 'am-btn am-btn-secondary';
+    retryBtn.textContent = 'Retry Run';
+    retryBtn.style.marginLeft = '12px';
+    retryBtn.addEventListener('click', () => {
+      this.errorBannerEl.hidden = true;
+      this.controller.startBenchmark();
+    });
+    this.errorBannerEl.append(text, retryBtn);
+    this.errorBannerEl.hidden = false;
   }
 
   private handleError(message: string): void {
